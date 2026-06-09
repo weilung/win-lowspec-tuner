@@ -1,0 +1,11 @@
+# 執行時產生的記錄檔
+optimize-log-*.txt
+*.log
+
+# 備份/暫存
+*.bak
+revert-data*.json
+
+# Windows
+Thumbs.db
+desktop.ini
