@@ -39,6 +39,52 @@ function Do-Change([scriptblock]$action, $desc) {
     try { & $action; Ok $desc } catch { WarnMsg ("失敗：$desc -> " + $_.Exception.Message) }
 }
 
+function Show-CheckList ($title, $prompt, [string[]]$items) {
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = $title
+    $form.ClientSize = New-Object System.Drawing.Size(480, 500)
+    $form.StartPosition = 'CenterScreen'
+    $form.TopMost = $true
+    $form.FormBorderStyle = 'FixedDialog'
+    $form.MaximizeBox = $false; $form.MinimizeBox = $false
+    $form.Font = New-Object System.Drawing.Font('Microsoft JhengHei UI', 9)
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Text = $prompt
+    $lbl.Location = New-Object System.Drawing.Point(14, 12)
+    $lbl.Size = New-Object System.Drawing.Size(452, 44)
+    $form.Controls.Add($lbl)
+    $clb = New-Object System.Windows.Forms.CheckedListBox
+    $clb.Location = New-Object System.Drawing.Point(14, 60)
+    $clb.Size = New-Object System.Drawing.Size(452, 360)
+    $clb.CheckOnClick = $true
+    foreach ($it in $items) { [void]$clb.Items.Add($it, $true) }
+    $form.Controls.Add($clb)
+    $btnAll = New-Object System.Windows.Forms.Button
+    $btnAll.Text = '全選'; $btnAll.Location = New-Object System.Drawing.Point(14, 430); $btnAll.Size = New-Object System.Drawing.Size(80, 32)
+    $btnAll.Add_Click({ 0..($clb.Items.Count - 1) | ForEach-Object { $clb.SetItemChecked($_, $true) } }.GetNewClosure())
+    $form.Controls.Add($btnAll)
+    $btnNone = New-Object System.Windows.Forms.Button
+    $btnNone.Text = '全不選'; $btnNone.Location = New-Object System.Drawing.Point(100, 430); $btnNone.Size = New-Object System.Drawing.Size(80, 32)
+    $btnNone.Add_Click({ 0..($clb.Items.Count - 1) | ForEach-Object { $clb.SetItemChecked($_, $false) } }.GetNewClosure())
+    $form.Controls.Add($btnNone)
+    $btnOk = New-Object System.Windows.Forms.Button
+    $btnOk.Text = '移除勾選項目'; $btnOk.Location = New-Object System.Drawing.Point(258, 430); $btnOk.Size = New-Object System.Drawing.Size(128, 32)
+    $btnOk.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $form.Controls.Add($btnOk)
+    $btnCancel = New-Object System.Windows.Forms.Button
+    $btnCancel.Text = '取消'; $btnCancel.Location = New-Object System.Drawing.Point(392, 430); $btnCancel.Size = New-Object System.Drawing.Size(74, 32)
+    $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $form.Controls.Add($btnCancel)
+    $form.AcceptButton = $btnOk; $form.CancelButton = $btnCancel
+    $r = $form.ShowDialog()
+    $checked = @($clb.CheckedItems)
+    $form.Dispose()
+    if ($r -eq [System.Windows.Forms.DialogResult]::OK) { return $checked }
+    return $null
+}
+
 function Get-SystemDriveMediaType {
     try {
         $sysLetter = $env:SystemDrive.TrimEnd(':')
@@ -160,24 +206,47 @@ function Set-DefenderGentle {
 
 # ========================= 選用項目 =========================
 function Remove-Bloatware {
-    Step 11 '移除常見內建肥大 App（選用）'
-    $list = @(
-        'Microsoft.BingNews','Microsoft.BingWeather','Microsoft.BingSports',
-        'Microsoft.MicrosoftSolitaireCollection','Microsoft.GetHelp','Microsoft.Getstarted',
-        'Microsoft.MicrosoftOfficeHub','Microsoft.People','Microsoft.WindowsFeedbackHub',
-        'Microsoft.MixedReality.Portal','Microsoft.3DBuilder','Microsoft.Microsoft3DViewer',
-        'Microsoft.Print3D','Microsoft.WindowsMaps','Microsoft.SkypeApp','Microsoft.OneConnect',
-        'Microsoft.Wallet','Microsoft.Office.Sway','king.com.CandyCrushSaga',
-        'king.com.CandyCrushSodaSaga','A278AB0D.GameloftGames','Flipboard.Flipboard'
-    )
-    Log '    會保留：相片、計算機、小畫家、剪取工具、Store、Terminal、媒體播放器 等常用 App。'
-    if ($script:DryRun) { Log ('    [試跑] 會嘗試移除：' + ($list -join ', ')) 'Magenta'; return }
-    $removed = 0
-    foreach ($n in $list) {
-        $pkg = Get-AppxPackage -Name $n -ErrorAction SilentlyContinue
-        if ($pkg) { try { $pkg | Remove-AppxPackage -ErrorAction Stop; Ok "移除 $n"; $removed++ } catch { WarnMsg "移除失敗 $n" } }
+    Step 11 '移除常見內建肥大 App（選用，勾選式）'
+    $nameMap = [ordered]@{
+        'Microsoft.BingNews'                     = 'Bing 新聞'
+        'Microsoft.BingWeather'                  = 'Bing 氣象'
+        'Microsoft.BingSports'                   = 'Bing 運動'
+        'Microsoft.MicrosoftSolitaireCollection' = '微軟接龍(含廣告)'
+        'Microsoft.GetHelp'                      = '取得協助'
+        'Microsoft.Getstarted'                   = '祕訣 Tips'
+        'Microsoft.MicrosoftOfficeHub'           = 'Office 廣告捷徑'
+        'Microsoft.People'                       = '連絡人'
+        'Microsoft.WindowsFeedbackHub'           = '意見反應中樞'
+        'Microsoft.MixedReality.Portal'          = '混合實境入口'
+        'Microsoft.3DBuilder'                    = '3D Builder'
+        'Microsoft.Microsoft3DViewer'            = '3D 檢視器'
+        'Microsoft.Print3D'                      = '3D 列印'
+        'Microsoft.WindowsMaps'                  = '地圖'
+        'Microsoft.SkypeApp'                     = 'Skype (內建版)'
+        'Microsoft.OneConnect'                   = '行動方案'
+        'Microsoft.Wallet'                       = '錢包'
+        'Microsoft.Office.Sway'                  = 'Sway'
+        'king.com.CandyCrushSaga'                = 'Candy Crush'
+        'king.com.CandyCrushSodaSaga'            = 'Candy Crush Soda'
+        'A278AB0D.GameloftGames'                 = 'Gameloft 遊戲'
+        'Flipboard.Flipboard'                    = 'Flipboard'
     }
-    Log "    共移除 $removed 個（其餘本來就沒裝）。需要可從 Microsoft Store 重新安裝。"
+    Log '    會保留：相片、計算機、小畫家、剪取工具、Store、Terminal、媒體播放器 等常用 App。'
+    $installed = @()
+    foreach ($id in $nameMap.Keys) { if (Get-AppxPackage -Name $id -ErrorAction SilentlyContinue) { $installed += $id } }
+    if (-not $installed.Count) { Skip '沒有偵測到可移除的內建肥大 App'; return }
+    if ($script:DryRun) { Log ('    [試跑] 偵測到可移除：' + ($installed -join ', ')) 'Magenta'; return }
+    $display = $installed | ForEach-Object { '{0}    {1}' -f $nameMap[$_], $_ }
+    $picked = Show-CheckList '選擇要移除的內建 App' ("預設已全部勾選。`r`n取消勾選 = 保留該 App；確認後按「移除勾選項目」。") $display
+    if ($null -eq $picked) { Skip '使用者取消移除'; return }
+    $ids = @($picked | ForEach-Object { ($_ -split '\s+')[-1] })
+    if (-not $ids.Count) { Skip '未勾選任何項目，不移除'; return }
+    $removed = 0
+    foreach ($id in $ids) {
+        $pkg = Get-AppxPackage -Name $id -ErrorAction SilentlyContinue
+        if ($pkg) { try { $pkg | Remove-AppxPackage -ErrorAction Stop; Ok "移除 $id"; $removed++ } catch { WarnMsg "移除失敗 $id" } }
+    }
+    Log "    共移除 $removed 個（共勾選 $($ids.Count) 個）。需要可從 Microsoft Store 重新安裝。"
 }
 
 function Set-WindowsUpdateNotify {
