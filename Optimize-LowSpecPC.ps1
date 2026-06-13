@@ -125,6 +125,29 @@ function Disable-Telemetry {
     } 'DiagTrack 已停用'
 }
 
+function Disable-DeliveryOptimization {
+    Step 11 '關閉「傳遞最佳化」P2P 上傳（不影響更新下載）'
+    Do-Change {
+        $do = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization'
+        if (-not (Test-Path $do)) { New-Item $do -Force | Out-Null }
+        Set-ItemProperty $do -Name DODownloadMode -Value 0 -Type DWord
+    } '已設為只從微軟下載、不上傳給其他電腦（省網路與磁碟）'
+}
+
+function Disable-CompatTelemetry {
+    Step 12 '停用相容性評估 / CEIP 排程（CompatTelRunner 等高耗能背景工作）'
+    if ($script:DryRun) { Log '    [試跑] 會停用 4 個相容性 / 體驗改進排程工作' 'Magenta'; return }
+    $tasks = @(
+        @{ P = '\Microsoft\Windows\Application Experience\';                  N = 'Microsoft Compatibility Appraiser' },
+        @{ P = '\Microsoft\Windows\Application Experience\';                  N = 'ProgramDataUpdater' },
+        @{ P = '\Microsoft\Windows\Customer Experience Improvement Program\'; N = 'Consolidator' },
+        @{ P = '\Microsoft\Windows\Customer Experience Improvement Program\'; N = 'UsbCeip' }
+    )
+    $n = 0
+    foreach ($t in $tasks) { try { Disable-ScheduledTask -TaskName $t.N -TaskPath $t.P -ErrorAction Stop | Out-Null; $n++ } catch {} }
+    Ok "已停用 $n 個相容性評估 / 體驗改進排程工作"
+}
+
 function Set-SearchDelayed {
     Step 4 'Windows Search → 延遲啟動（功能保留，開機不搶硬碟）'
     Do-Change { & sc.exe config WSearch start= delayed-auto | Out-Null } 'WSearch 已設為延遲自動啟動'
@@ -179,9 +202,9 @@ function Optimize-SystemDrive {
     Log "    系統碟 $env:SystemDrive 媒體類型：$media"
     if ($script:DryRun) { Log '    [試跑] HDD 會重組 / SSD 會 TRIM / 未知則跳過' 'Magenta'; return }
     switch ($media) {
-        'SSD'  { Do-Change { Optimize-Volume -DriveLetter $sysLetter -ReTrim -ErrorAction Stop } 'SSD：已執行 TRIM（不重組，保護壽命）' }
-        'HDD'  { WarnMsg '偵測到 HDD，重組可能需數十分鐘，請耐心等候…'
-                 Do-Change { Optimize-Volume -DriveLetter $sysLetter -Defrag -ErrorAction Stop } 'HDD：已執行重組' }
+        'SSD'  { Do-Change { Optimize-Volume -DriveLetter $sysLetter -ReTrim -Verbose -ErrorAction Stop } 'SSD：已執行 TRIM（不重組，保護壽命）' }
+        'HDD'  { WarnMsg '偵測到 HDD，重組可能需數十分鐘；下面會即時顯示進度 %，請耐心等候…'
+                 Do-Change { Optimize-Volume -DriveLetter $sysLetter -Defrag -Verbose -ErrorAction Stop } 'HDD：已執行重組' }
         default { WarnMsg '無法判斷媒體類型，保險起見跳過磁碟最佳化' }
     }
 }
@@ -317,6 +340,11 @@ function Get-OptimizationStatus {
         StatLine 'Defender 掃描溫和化' $gentle ("低優先=$($mp.EnableLowCpuPriority) / CPU上限=$($mp.ScanAvgCPULoadFactor)%")
     } catch { StatLine 'Defender 掃描溫和化' $false '無法查詢（需系統管理員）' }
 
+    $dom = (Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization' -EA SilentlyContinue).DODownloadMode
+    StatLine '傳遞最佳化 P2P 已關閉' ($dom -eq 0) "DODownloadMode=$dom"
+    $appr = $null; try { $appr = (Get-ScheduledTask -TaskName 'Microsoft Compatibility Appraiser' -TaskPath '\Microsoft\Windows\Application Experience\' -EA Stop).State } catch {}
+    StatLine '相容性評估排程已停用' ($appr -eq 'Disabled') "Appraiser=$appr"
+
     Log ''
     Log '  --- 選用項目 ---' 'White'
 
@@ -342,6 +370,8 @@ function Apply-Recommended {
     Set-PowerHighPerformance
     Set-VisualEffectsPerformance
     Disable-Telemetry
+    Disable-DeliveryOptimization
+    Disable-CompatTelemetry
     Set-SearchDelayed
     Disable-BackgroundApps
     Enable-StorageSense
@@ -386,7 +416,7 @@ else {
     do {
         Log ''
         Log '請選擇要做的事：' 'White'
-        Log '  [1] 套用建議安全項目（10 項，可還原）'
+        Log '  [1] 套用建議安全項目（12 項，可還原）'
         Log '  [2] 安全項目 + 選用項目（逐項確認）'
         Log '  [3] 試跑（只顯示會做什麼，不變更）'
         Log '  [4] 還原為 Windows 預設'

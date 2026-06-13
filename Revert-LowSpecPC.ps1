@@ -62,6 +62,18 @@ Try-Do '分頁檔 → 自動管理' {
     if (-not $cs.AutomaticManagedPagefile) { Set-CimInstance -InputObject $cs -Property @{ AutomaticManagedPagefile = $true } }
 }
 
+Try-Do '傳遞最佳化 → 恢復預設' {
+    Remove-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization' -Name DODownloadMode -ErrorAction SilentlyContinue
+}
+Try-Do '相容性評估 / CEIP 排程 → 重新啟用' {
+    foreach ($t in @(
+            @{ P = '\Microsoft\Windows\Application Experience\';                  N = 'Microsoft Compatibility Appraiser' },
+            @{ P = '\Microsoft\Windows\Application Experience\';                  N = 'ProgramDataUpdater' },
+            @{ P = '\Microsoft\Windows\Customer Experience Improvement Program\'; N = 'Consolidator' },
+            @{ P = '\Microsoft\Windows\Customer Experience Improvement Program\'; N = 'UsbCeip' }
+        )) { try { Enable-ScheduledTask -TaskName $t.N -TaskPath $t.P -ErrorAction Stop | Out-Null } catch {} }
+}
+
 if ($IncludeReminders) {
     Try-Do '移除維護提醒排程' {
         Get-ScheduledTask -TaskPath '\MaintenanceReminder\' -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false -ErrorAction SilentlyContinue
