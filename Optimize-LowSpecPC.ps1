@@ -273,6 +273,69 @@ function Set-FixedPageFile {
     } "已設定固定分頁檔 $sizeMB MB（重開機後生效）"
 }
 
+# ========================= 狀態檢查（只讀，不變更） =========================
+function StatLine ($name, $isOn, $detail = '') {
+    $mark  = if ($isOn) { '[ 已套用 ]' } else { '[ 未套用 ]' }
+    $color = if ($isOn) { 'Green' }      else { 'DarkGray' }
+    $line  = "  {0}  {1}" -f $mark, $name
+    if ($detail) { $line += "  （$detail）" }
+    Log $line $color
+}
+
+function Get-OptimizationStatus {
+    Log ''
+    Log '====== 目前最佳化狀態檢查（只看不改） ======' 'White'
+    $ram = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 1)
+    Log ("  硬體：記憶體 ${ram}GB ｜ 系統碟 $env:SystemDrive = $(Get-SystemDriveMediaType)") 'Cyan'
+    Log ''
+    Log '  --- 建議安全項目 ---' 'White'
+
+    $hp = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
+    StatLine '電源計畫 = 高效能' (((powercfg /getactivescheme 2>$null) -join ' ') -match $hp)
+
+    $vfx = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects' -EA SilentlyContinue).VisualFXSetting
+    StatLine '視覺效果 = 效能優先' ($vfx -eq 2) "VisualFXSetting=$vfx"
+
+    $dt = (Get-Service DiagTrack -EA SilentlyContinue).StartType
+    StatLine '遙測 DiagTrack 已停用' ($dt -eq 'Disabled') "目前=$dt"
+
+    $ws = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\WSearch' -EA SilentlyContinue
+    StatLine 'Windows Search = 延遲啟動' (($ws.Start -eq 2) -and ($ws.DelayedAutostart -eq 1))
+
+    $bg = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications' -EA SilentlyContinue).GlobalUserDisabled
+    StatLine 'UWP 背景應用已關閉' ($bg -eq 1)
+
+    $ss = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\StorageSense\Parameters\StoragePolicy' -EA SilentlyContinue).'01'
+    StatLine 'Storage Sense 已開啟' ($ss -eq 1)
+
+    $mc = $false; try { $mc = [bool](Get-MMAgent).MemoryCompression } catch {}
+    StatLine '記憶體壓縮（類 Linux zram）' $mc
+
+    try {
+        $mp = Get-MpPreference -EA Stop
+        $gentle = $mp.EnableLowCpuPriority -and ($mp.ScanAvgCPULoadFactor -le 30) -and (-not $mp.DisableCpuThrottleOnIdleScans)
+        StatLine 'Defender 掃描溫和化' $gentle ("低優先=$($mp.EnableLowCpuPriority) / CPU上限=$($mp.ScanAvgCPULoadFactor)%")
+    } catch { StatLine 'Defender 掃描溫和化' $false '無法查詢（需系統管理員）' }
+
+    Log ''
+    Log '  --- 選用項目 ---' 'White'
+
+    $auto = (Get-CimInstance Win32_ComputerSystem).AutomaticManagedPagefile
+    $pf = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management' -EA SilentlyContinue).PagingFiles -join ' ; '
+    StatLine '固定分頁檔' ((-not $auto) -and ($pf -match '\s\d+\s+\d+')) $(if ($auto) { '目前=自動管理' } else { "PagingFiles=$pf" })
+
+    $au = (Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -EA SilentlyContinue).AUOptions
+    StatLine 'Windows Update = 僅通知' ($au -eq 2) $(if ($au) { "AUOptions=$au" } else { '未設定（仍自動更新）' })
+
+    $bloat = @('Microsoft.BingNews','Microsoft.BingWeather','Microsoft.BingSports','Microsoft.MicrosoftSolitaireCollection','Microsoft.GetHelp','Microsoft.Getstarted','Microsoft.MicrosoftOfficeHub','Microsoft.People','Microsoft.WindowsFeedbackHub','Microsoft.MixedReality.Portal','Microsoft.3DBuilder','Microsoft.Microsoft3DViewer','Microsoft.Print3D','Microsoft.WindowsMaps','Microsoft.SkypeApp','Microsoft.OneConnect','Microsoft.Wallet','Microsoft.Office.Sway','king.com.CandyCrushSaga','king.com.CandyCrushSodaSaga','A278AB0D.GameloftGames','Flipboard.Flipboard')
+    $still = @($bloat | Where-Object { Get-AppxPackage -Name $_ -EA SilentlyContinue })
+    StatLine '內建肥大 App 已清除' ($still.Count -eq 0) ("清單 $($bloat.Count) 項中還剩 $($still.Count) 項")
+
+    Log ''
+    Log '  [已套用]=綠色已生效；[未套用]=灰色。選用項目沒做是正常的。' 'DarkGray'
+    Log '  (固定分頁檔/WU 設定值會立即顯示為已套用，但實際效果需重開機。)' 'DarkGray'
+}
+
 # ========================= 流程 =========================
 function Apply-Recommended {
     $script:StepNum = 0
@@ -327,6 +390,7 @@ else {
         Log '  [2] 安全項目 + 選用項目（逐項確認）'
         Log '  [3] 試跑（只顯示會做什麼，不變更）'
         Log '  [4] 還原為 Windows 預設'
+        Log '  [5] 檢查目前最佳化狀態（只看不改）'
         Log '  [Q] 離開'
         $c = Read-Host '輸入選項'
         switch ($c) {
@@ -337,6 +401,7 @@ else {
                     $rev = Join-Path $PSScriptRoot 'Revert-LowSpecPC.ps1'
                     if (Test-Path $rev) { & $rev } else { WarnMsg '找不到 Revert-LowSpecPC.ps1' }
                 }
+            '5' { Get-OptimizationStatus }
             default { if ($c -notmatch '^[Qq]$') { WarnMsg '無效選項' } }
         }
     } while ($c -notmatch '^[Qq]$')
