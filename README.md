@@ -8,7 +8,7 @@
 
 - **自動偵測 HDD / SSD**：是 HDD 才做重組；是 SSD 只做 TRIM（不會傷 SSD 壽命）。
 - **可還原**：附 `Revert-LowSpecPC.ps1`，一鍵還原為 Windows 預設。
-- **危險項目要你點頭**：移除內建 App、改 Windows Update、固定分頁檔都是「選用」、會先問。
+- **危險項目要你點頭**：移除內建 App、停用開機程式、改 Windows Update、固定分頁檔都是「選用」、會先問。
 - **不裝額外軟體**：純 PowerShell + Windows 內建功能。
 
 ## ⚠️ 使用前必讀
@@ -59,6 +59,7 @@
 | 關閉傳遞最佳化 P2P | 不把更新上傳給其他電腦，省網路/磁碟 | 安全 | Revert |
 | 停用相容性評估排程 | 砍掉 CompatTelRunner 等背景耗能工作 | 安全 | Revert |
 | 移除內建肥大 App | 省空間、開始功能表更乾淨 | **選用** | 從 Store 重裝 |
+| 停用開機自動啟動程式 | 勾選式，減少開機搶硬碟與常駐 RAM | **選用** | Revert / 工作管理員 |
 | Windows Update → 僅通知 | 自己決定何時更新 | **選用** | Revert |
 | 固定分頁檔 | HDD 上減少破碎、避免臨時長大卡頓 | **選用** | Revert |
 

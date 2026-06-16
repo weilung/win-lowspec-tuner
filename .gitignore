@@ -5,6 +5,7 @@ optimize-log-*.txt
 # 備份/暫存
 *.bak
 revert-data*.json
+startup-disabled-backup.json
 
 # Windows
 Thumbs.db

@@ -74,6 +74,20 @@ Try-Do '相容性評估 / CEIP 排程 → 重新啟用' {
         )) { try { Enable-ScheduledTask -TaskName $t.N -TaskPath $t.P -ErrorAction Stop | Out-Null } catch {} }
 }
 
+Try-Do '還原被停用的開機程式（依備份檔 startup-disabled-backup.json）' {
+    $bf = Join-Path $PSScriptRoot 'startup-disabled-backup.json'
+    if (Test-Path $bf) {
+        $items = @(Get-Content $bf -Raw | ConvertFrom-Json)
+        foreach ($it in $items) {
+            if ($it.Approved -and $it.Name -and (Test-Path $it.Approved)) {
+                $b = New-Object byte[] 12; $b[0] = 2   # 02 = 啟用
+                Set-ItemProperty -Path $it.Approved -Name $it.Name -Value ([byte[]]$b) -Type Binary -ErrorAction SilentlyContinue
+            }
+        }
+        Remove-Item $bf -Force -ErrorAction SilentlyContinue
+    }
+}
+
 if ($IncludeReminders) {
     Try-Do '移除維護提醒排程' {
         Get-ScheduledTask -TaskPath '\MaintenanceReminder\' -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false -ErrorAction SilentlyContinue

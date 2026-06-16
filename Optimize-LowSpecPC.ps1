@@ -27,6 +27,7 @@ if ($PSVersionTable.PSEdition -eq 'Core' -or -not $isAdmin) {
 }
 
 $script:DryRun = [bool]$DryRun
+$script:Interactive = $false   # 由選單 [1]/[2] 設為 $true：才會跳勾選清單、才會對耗時項目問 y/N
 $script:LogFile = Join-Path $PSScriptRoot ("optimize-log-{0}.txt" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
 
 function Log    ($m, $c='Gray')  { Write-Host $m -ForegroundColor $c; Add-Content -Path $script:LogFile -Value $m -Encoding UTF8 }
@@ -39,7 +40,7 @@ function Do-Change([scriptblock]$action, $desc) {
     try { & $action; Ok $desc } catch { WarnMsg ("失敗：$desc -> " + $_.Exception.Message) }
 }
 
-function Show-CheckList ($title, $prompt, [string[]]$items) {
+function Show-CheckList ($title, $prompt, [string[]]$items, [bool]$DefaultChecked = $true, $OkText = '移除勾選項目') {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
     $form = New-Object System.Windows.Forms.Form
@@ -59,7 +60,7 @@ function Show-CheckList ($title, $prompt, [string[]]$items) {
     $clb.Location = New-Object System.Drawing.Point(14, 60)
     $clb.Size = New-Object System.Drawing.Size(452, 360)
     $clb.CheckOnClick = $true
-    foreach ($it in $items) { [void]$clb.Items.Add($it, $true) }
+    foreach ($it in $items) { [void]$clb.Items.Add($it, $DefaultChecked) }
     $form.Controls.Add($clb)
     $btnAll = New-Object System.Windows.Forms.Button
     $btnAll.Text = '全選'; $btnAll.Location = New-Object System.Drawing.Point(14, 430); $btnAll.Size = New-Object System.Drawing.Size(80, 32)
@@ -70,7 +71,7 @@ function Show-CheckList ($title, $prompt, [string[]]$items) {
     $btnNone.Add_Click({ 0..($clb.Items.Count - 1) | ForEach-Object { $clb.SetItemChecked($_, $false) } }.GetNewClosure())
     $form.Controls.Add($btnNone)
     $btnOk = New-Object System.Windows.Forms.Button
-    $btnOk.Text = '移除勾選項目'; $btnOk.Location = New-Object System.Drawing.Point(258, 430); $btnOk.Size = New-Object System.Drawing.Size(128, 32)
+    $btnOk.Text = $OkText; $btnOk.Location = New-Object System.Drawing.Point(258, 430); $btnOk.Size = New-Object System.Drawing.Size(128, 32)
     $btnOk.DialogResult = [System.Windows.Forms.DialogResult]::OK
     $form.Controls.Add($btnOk)
     $btnCancel = New-Object System.Windows.Forms.Button
@@ -180,6 +181,12 @@ function Invoke-DiskCleanup {
     Step 7 '磁碟清理（暫存 + Windows Update 快取）'
     if ($script:DryRun) { Log '    [試跑] 會清理 %TEMP%、C:\Windows\Temp、SoftwareDistribution\Download' 'Magenta'; return }
     function script:FolderMB($p) { if (Test-Path $p) { [math]::Round((Get-ChildItem $p -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum / 1MB) } else { 0 } }
+    if ($script:Interactive) {
+        $est = @('C:\Windows\SoftwareDistribution\Download', $env:TEMP, 'C:\Windows\Temp') | ForEach-Object { FolderMB $_ } | Measure-Object -Sum
+        Log ("    預估可清理約 {0} MB（使用中的檔案會自動略過）" -f [int]$est.Sum)
+        $ans = Read-Host '    執行磁碟清理？(Y/n)'
+        if ($ans -match '^[Nn]') { Skip '使用者選擇暫不清理'; return }
+    }
     $freed = 0
     $wu = 'C:\Windows\SoftwareDistribution\Download'
     $b = FolderMB $wu
@@ -200,11 +207,34 @@ function Optimize-SystemDrive {
     $media = Get-SystemDriveMediaType
     $sysLetter = $env:SystemDrive.TrimEnd(':')
     Log "    系統碟 $env:SystemDrive 媒體類型：$media"
-    if ($script:DryRun) { Log '    [試跑] HDD 會重組 / SSD 會 TRIM / 未知則跳過' 'Magenta'; return }
+    if ($script:DryRun) { Log '    [試跑] HDD 會先分析碎片 → 視情況重組 / SSD 會 TRIM / 未知則跳過' 'Magenta'; return }
     switch ($media) {
         'SSD'  { Do-Change { Optimize-Volume -DriveLetter $sysLetter -ReTrim -Verbose -ErrorAction Stop } 'SSD：已執行 TRIM（不重組，保護壽命）' }
-        'HDD'  { WarnMsg '偵測到 HDD，重組可能需數十分鐘；下面會即時顯示進度 %，請耐心等候…'
-                 Do-Change { Optimize-Volume -DriveLetter $sysLetter -Defrag -Verbose -ErrorAction Stop } 'HDD：已執行重組' }
+        'HDD'  {
+            Log '    正在分析碎片狀況（約數秒）…'
+            $recommend = $null; $fragPct = $null
+            try {
+                $vol = Get-CimInstance Win32_Volume -Filter "DriveLetter='$env:SystemDrive'" -ErrorAction Stop
+                $r = Invoke-CimMethod -InputObject $vol -MethodName DefragAnalysis -ErrorAction Stop
+                if ($r.ReturnValue -eq 0) { $recommend = [bool]$r.DefragRecommended; $fragPct = $r.DefragAnalysis.FilePercentFragmentation }
+            } catch { WarnMsg ('碎片分析失敗（' + $_.Exception.Message + '）；改為直接詢問是否重組') }
+
+            if ($null -ne $fragPct) { Log ("    目前檔案碎片率約 {0}%；Windows 建議重組：{1}" -f $fragPct, $recommend) }
+
+            # 預設依 Windows 的建議：碎片低→預設不跑(N)、碎片高→預設跑(Y)；非互動模式則照建議自動決定
+            $defaultYes = ($recommend -ne $false)   # $null(分析失敗) 或 $true 都當作建議重組
+            $go = $defaultYes
+            if ($script:Interactive) {
+                if ($defaultYes) { $go = (Read-Host '    建議重組（可能數十分鐘）。現在執行？(Y/n)') -notmatch '^[Nn]' }
+                else             { $go = (Read-Host '    碎片率低、建議略過。仍要重組？(y/N)') -match '^[Yy]' }
+            }
+            if ($go) {
+                WarnMsg '開始重組，下面會即時顯示進度 %，請耐心等候…'
+                Do-Change { Optimize-Volume -DriveLetter $sysLetter -Defrag -Verbose -ErrorAction Stop } 'HDD：已執行重組'
+            } else {
+                Skip ('略過重組' + $(if ($null -ne $fragPct) { "（碎片率 $fragPct%）" } else { '' }))
+            }
+        }
         default { WarnMsg '無法判斷媒體類型，保險起見跳過磁碟最佳化' }
     }
 }
@@ -296,6 +326,110 @@ function Set-FixedPageFile {
     } "已設定固定分頁檔 $sizeMB MB（重開機後生效）"
 }
 
+# ----- 開機自動啟動程式：共用工具 -----
+# 用 Windows 內建的 StartupApproved 機制停用（與「工作管理員 → 啟動」同一套）：
+# 12 位元組二進位值，第 0 位元組偶數(02)=啟用、奇數(03)=停用。停用 = 不刪除程式，可隨時還原。
+$script:StartupSources = @(
+    @{ Run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run';             Approved = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run';   Label = '使用者' },
+    @{ Run = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run';             Approved = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run';   Label = '全電腦' },
+    @{ Run = 'HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Run'; Approved = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32'; Label = '全電腦32' }
+)
+
+function Test-StartupDisabled($approved, $name) {
+    $v = (Get-ItemProperty -Path $approved -Name $name -EA SilentlyContinue).$name
+    if ($v -and $v.Length -ge 1) { return (($v[0] -band 1) -eq 1) }
+    return $false
+}
+
+function Set-StartupState($approved, $name, [bool]$enabled) {
+    if (-not (Test-Path $approved)) { New-Item $approved -Force | Out-Null }
+    $b = New-Object byte[] 12
+    if ($enabled) { $b[0] = 2 }
+    else { $b[0] = 3; [Array]::Copy([BitConverter]::GetBytes([DateTime]::Now.ToFileTime()), 0, $b, 4, 8) }
+    Set-ItemProperty -Path $approved -Name $name -Value ([byte[]]$b) -Type Binary
+}
+
+$script:StartupFolders = @(
+    @{ Path = [Environment]::GetFolderPath('Startup');       Approved = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder'; Label = '啟動資料夾' },
+    @{ Path = [Environment]::GetFolderPath('CommonStartup'); Approved = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder'; Label = '共用啟動夾' }
+)
+
+function Get-StartupEntries {
+    $list = @()
+    foreach ($s in $script:StartupSources) {
+        if (-not (Test-Path $s.Run)) { continue }
+        $props = Get-ItemProperty -Path $s.Run -EA SilentlyContinue
+        if (-not $props) { continue }
+        foreach ($p in $props.PSObject.Properties) {
+            if ($p.Name -like 'PS*') { continue }
+            $list += [pscustomobject]@{
+                Name     = $p.Name
+                Command  = [string]$p.Value
+                Approved = $s.Approved
+                Label    = $s.Label
+                Disabled = (Test-StartupDisabled $s.Approved $p.Name)
+            }
+        }
+    }
+    foreach ($fo in $script:StartupFolders) {
+        if (-not $fo.Path -or -not (Test-Path $fo.Path)) { continue }
+        Get-ChildItem -Path $fo.Path -File -EA SilentlyContinue |
+            Where-Object { $_.Name -ne 'desktop.ini' } | ForEach-Object {
+                $list += [pscustomobject]@{
+                    Name     = $_.Name
+                    Command  = $_.FullName
+                    Approved = $fo.Approved
+                    Label    = $fo.Label
+                    Disabled = (Test-StartupDisabled $fo.Approved $_.Name)
+                }
+            }
+    }
+    return $list
+}
+
+function Manage-StartupApps {
+    Step 14 '停用開機自動啟動程式（選用，勾選式；停用而非刪除）'
+    $entries = Get-StartupEntries
+    $enabled = @($entries | Where-Object { -not $_.Disabled })
+    if (-not $enabled.Count) { Skip '沒有偵測到「開機自動啟動」的程式項目'; return }
+    Log '    （本工具只處理可安全還原的：登錄 Run 機碼 + 「啟動」資料夾。）' 'DarkGray'
+    Log '    （Store/UWP App[如 ChatGPT]、服務[如 FortiClient]、工作排程登入觸發 不在此處；請用「工作管理員→啟動」或 services.msc。）' 'DarkGray'
+    Log '    以下是目前會在開機/登入時自動啟動的程式：'
+    if ($script:DryRun) {
+        $enabled | ForEach-Object { Log ('    - {0}  [{1}]  {2}' -f $_.Name, $_.Label, $_.Command) 'Magenta' }
+        Log '    [試跑] 不會變更；實際執行時可勾選要停用的項目' 'Magenta'
+        return
+    }
+    $map = @{}
+    $display = foreach ($e in $enabled) {
+        $cmd = $e.Command; if ($cmd.Length -gt 48) { $cmd = $cmd.Substring(0, 45) + '...' }
+        $d = '{0}    [{1}]    {2}' -f $e.Name, $e.Label, $cmd
+        $map[$d] = $e
+        $d
+    }
+    $picked = Show-CheckList '選擇要停用的開機程式' ("預設全部「不勾選」（保守做法）。`r`n只勾選你確定不需要開機自動啟動的程式；停用 = 不刪除程式，隨時可手動開或一鍵還原。`r`n切勿停用：音效 / 觸控板 / 防毒 / 輸入法 等驅動小工具！") $display $false '停用勾選項目'
+    if ($null -eq $picked) { Skip '使用者取消'; return }
+    if (-not @($picked).Count) { Skip '未勾選任何項目，不變更'; return }
+    $backupFile = Join-Path $PSScriptRoot 'startup-disabled-backup.json'
+    $backup = @()
+    if (Test-Path $backupFile) { try { $backup = @(Get-Content $backupFile -Raw | ConvertFrom-Json) } catch { $backup = @() } }
+    $done = 0
+    foreach ($d in $picked) {
+        $e = $map[[string]$d]
+        if (-not $e) { continue }
+        try {
+            Set-StartupState $e.Approved $e.Name $false
+            $backup += [pscustomobject]@{ Approved = $e.Approved; Name = $e.Name }
+            Ok "已停用開機啟動：$($e.Name)"
+            $done++
+        } catch { WarnMsg "停用失敗 $($e.Name)：$($_.Exception.Message)" }
+    }
+    if ($done) {
+        $backup | Sort-Object Approved, Name -Unique | ConvertTo-Json | Set-Content -Path $backupFile -Encoding UTF8
+        Log "    共停用 $done 個開機程式；可在「工作管理員 → 啟動」或執行 Revert-LowSpecPC.ps1 還原。"
+    }
+}
+
 # ========================= 狀態檢查（只讀，不變更） =========================
 function StatLine ($name, $isOn, $detail = '') {
     $mark  = if ($isOn) { '[ 已套用 ]' } else { '[ 未套用 ]' }
@@ -359,31 +493,48 @@ function Get-OptimizationStatus {
     $still = @($bloat | Where-Object { Get-AppxPackage -Name $_ -EA SilentlyContinue })
     StatLine '內建肥大 App 已清除' ($still.Count -eq 0) ("清單 $($bloat.Count) 項中還剩 $($still.Count) 項")
 
+    $sd = @(Get-StartupEntries | Where-Object { $_.Disabled }).Count
+    StatLine '已停用部分開機程式' ($sd -gt 0) "目前停用 $sd 個（依個人需求，非必做）"
+
     Log ''
     Log '  [已套用]=綠色已生效；[未套用]=灰色。選用項目沒做是正常的。' 'DarkGray'
     Log '  (固定分頁檔/WU 設定值會立即顯示為已套用，但實際效果需重開機。)' 'DarkGray'
 }
 
 # ========================= 流程 =========================
+$script:RecommendedItems = @(
+    @{ Name = '電源計畫 → 高效能';                 Func = { Set-PowerHighPerformance } },
+    @{ Name = '視覺效果 → 效能優先';               Func = { Set-VisualEffectsPerformance } },
+    @{ Name = '停用遙測 DiagTrack';                Func = { Disable-Telemetry } },
+    @{ Name = '關閉傳遞最佳化 P2P';                Func = { Disable-DeliveryOptimization } },
+    @{ Name = '停用相容性評估排程';                Func = { Disable-CompatTelemetry } },
+    @{ Name = 'Windows Search → 延遲啟動';         Func = { Set-SearchDelayed } },
+    @{ Name = '關閉 UWP 背景應用';                 Func = { Disable-BackgroundApps } },
+    @{ Name = '開啟 Storage Sense';                Func = { Enable-StorageSense } },
+    @{ Name = '磁碟清理（暫存 + 更新快取）★耗時';  Func = { Invoke-DiskCleanup } },
+    @{ Name = '確認記憶體壓縮';                    Func = { Enable-MemoryCompressionIfOff } },
+    @{ Name = 'Defender 掃描溫和化';               Func = { Set-DefenderGentle } },
+    @{ Name = '磁碟最佳化 HDD重組/SSD TRIM ★耗時'; Func = { Optimize-SystemDrive } }
+)
+
 function Apply-Recommended {
     $script:StepNum = 0
-    Set-PowerHighPerformance
-    Set-VisualEffectsPerformance
-    Disable-Telemetry
-    Disable-DeliveryOptimization
-    Disable-CompatTelemetry
-    Set-SearchDelayed
-    Disable-BackgroundApps
-    Enable-StorageSense
-    Invoke-DiskCleanup
-    Enable-MemoryCompressionIfOff
-    Set-DefenderGentle
-    Optimize-SystemDrive
+    $selected = $script:RecommendedItems
+    if ($script:Interactive -and -not $script:DryRun) {
+        $names = $script:RecommendedItems | ForEach-Object { $_.Name }
+        $picked = Show-CheckList '選擇要套用的建議項目' ("預設全部勾選；取消勾選 = 不執行該項。`r`n標 ★耗時 的項目（磁碟清理 / 重組）若勾選，執行前會再分析現況並問你 y/N。") $names $true '套用勾選項目'
+        if ($null -eq $picked) { Skip '使用者取消，未套用任何項目'; return }
+        $pickedSet = @($picked)
+        if (-not $pickedSet.Count) { Skip '未勾選任何項目'; return }
+        $selected = $script:RecommendedItems | Where-Object { $pickedSet -contains $_.Name }
+    }
+    foreach ($it in $selected) { & $it.Func }
 }
 
 function Apply-Optional {
     $opts = @(
         @{ Name = '移除內建肥大 App';            Func = { Remove-Bloatware } },
+        @{ Name = '停用開機自動啟動程式';        Func = { Manage-StartupApps } },
         @{ Name = 'Windows Update 改為僅通知';   Func = { Set-WindowsUpdateNotify } },
         @{ Name = '固定分頁檔大小';              Func = { Set-FixedPageFile } }
     )
@@ -391,6 +542,16 @@ function Apply-Optional {
         $ans = Read-Host ("是否執行：{0}？(y/N)" -f $o.Name)
         if ($ans -match '^[Yy]') { & $o.Func } else { Skip ('使用者略過：' + $o.Name) }
     }
+}
+
+# 試跑時也把選用項目顯示出來（只顯示、不變更、不詢問）
+function Show-OptionalDryRun {
+    Log ''
+    Log '--- 選用項目（試跑；實際執行請用選單 [2]，會逐項詢問） ---' 'White'
+    Remove-Bloatware
+    Manage-StartupApps
+    Set-WindowsUpdateNotify
+    Set-FixedPageFile
 }
 
 # ---- 主程式 ----
@@ -402,8 +563,8 @@ Log ("記錄檔：$script:LogFile") 'DarkGray'
 
 if ($DryRun) {
     Apply-Recommended
+    Show-OptionalDryRun
     Log ''
-    Log '（選用項目請用選單，或加 -Recommended -IncludeOptional 執行）' 'DarkGray'
     Log '（以上為試跑，未變更任何設定）' 'Magenta'
 }
 elseif ($Recommended) {
@@ -416,7 +577,7 @@ else {
     do {
         Log ''
         Log '請選擇要做的事：' 'White'
-        Log '  [1] 套用建議安全項目（12 項，可還原）'
+        Log '  [1] 套用建議安全項目（先勾選；★耗時項目會再問 y/N，可還原）'
         Log '  [2] 安全項目 + 選用項目（逐項確認）'
         Log '  [3] 試跑（只顯示會做什麼，不變更）'
         Log '  [4] 還原為 Windows 預設'
@@ -424,9 +585,9 @@ else {
         Log '  [Q] 離開'
         $c = Read-Host '輸入選項'
         switch ($c) {
-            '1' { Apply-Recommended; Log ''; Log '完成！固定分頁檔/WU 等項目需重開機生效。' 'Green' }
-            '2' { Apply-Recommended; Apply-Optional; Log ''; Log '完成！記得重開機。' 'Green' }
-            '3' { $script:DryRun = $true; Apply-Recommended; $script:DryRun = $false; Log ''; Log '（以上為試跑，未變更任何設定）' 'Magenta' }
+            '1' { $script:Interactive = $true; Apply-Recommended; $script:Interactive = $false; Log ''; Log '完成！固定分頁檔/WU 等項目需重開機生效。' 'Green' }
+            '2' { $script:Interactive = $true; Apply-Recommended; Apply-Optional; $script:Interactive = $false; Log ''; Log '完成！記得重開機。' 'Green' }
+            '3' { $script:DryRun = $true; Apply-Recommended; Show-OptionalDryRun; $script:DryRun = $false; Log ''; Log '（以上為試跑，未變更任何設定）' 'Magenta' }
             '4' {
                     $rev = Join-Path $PSScriptRoot 'Revert-LowSpecPC.ps1'
                     if (Test-Path $rev) { & $rev } else { WarnMsg '找不到 Revert-LowSpecPC.ps1' }
