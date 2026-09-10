@@ -61,7 +61,7 @@
 | 停用相容性評估排程 | 砍掉 CompatTelRunner 等背景耗能工作 | 安全 | Revert |
 | 移除內建肥大 App | 省空間、開始功能表更乾淨 | **選用** | 從 Store 重裝 |
 | 停用開機自動啟動程式 | 勾選式，減少開機搶硬碟與常駐 RAM | **選用** | Revert / 工作管理員 |
-| Windows Update → 鎖定 | 停用更新服務，完全由你挑時間手動裝（附「開窗更新」） | **選用** | Revert |
+| Windows Update → 鎖定 | 完全由你挑時間手動裝（Pro 用原則、家用版停服務；附「開窗更新」） | **選用** | Revert |
 | 固定分頁檔 | HDD 上減少破碎、避免臨時長大卡頓 | **選用** | Revert |
 
 > 「Defender 掃描溫和化」只是降低排程掃描的 CPU 優先權與用量，**即時防護全程開著**，不會降低防毒能力。
@@ -70,31 +70,31 @@
 
 ## 🔒 Windows Update → 鎖定（選用）與「開窗更新」
 
-**家用版（Home）沒有「僅通知」的群組原則**——`AUOptions` 這條原則只有 Pro／Enterprise／Education 會生效，家用版寫了也被忽略，更新照樣自動下載、安裝、重開機。
+**家用版（Home）會忽略「設定自動更新」群組原則**——`AUOptions` / `NoAutoUpdate` 只有 Pro／Enterprise／Education 會生效，家用版寫了也被忽略，更新照樣自動下載、安裝、重開機。
 
-工具執行鎖定時會**自動偵測 Windows 版本**並給對應說明：
+所以工具鎖定時會**自動偵測 Windows 版本**，分兩種模式：
 
-- **Pro／Enterprise／Education**：其實只要 `NoAutoUpdate=1` 就能手動更新；下面停用服務為更強的選用做法。
-- **家用版**：原則無效，只能用停用服務；較溫和的替代是「設定 → Windows Update → 進階選項 → 使用時間」，但只能鎖 18 小時窗、擋不掉 servicing 收尾階段的重開，所以工具不走這條。
+| 模式 | 適用版本 | 做什麼 | 開窗更新 |
+|---|---|---|---|
+| **policy** | Pro／Enterprise／Education | 只設 `NoAutoUpdate=1` + `NoAutoRebootWithLoggedOnUsers=1`，**完全不碰服務**。這是有支援、有文件的做法，Store／Defender／DISM／管理層都不受影響，移除一個值就還原。 | 直接開設定頁按檢查更新即可（原則不影響手動更新）|
+| **services** | 家用版（`EditionID` = `Core*`）| 原則無效，改停用 `wuauserv` / `UsoSvc` / `WaaSMedicSvc` 三個服務（`Start=4`）＋停用 UpdateOrchestrator 的 `Reboot*` 排程，另設上面兩個原則當保險。 | 暫時解鎖 → 手動裝 → 重開後由排程自動鎖回 |
 
-停用的更新相關服務：
+> policy 模式若本機由公司 IT 以 WSUS／Intune 控管，**請勿自行鎖定**，會與管理原則衝突。
+>
+> 家用版較溫和的替代是「設定 → Windows Update → 進階選項 → 使用時間」，但只能鎖 18 小時窗、擋不掉 servicing 收尾階段的重開，所以工具不走這條。
 
-| 服務 | 用途 | 鎖定後 |
-|---|---|---|
-| `wuauserv` | Windows Update | 停用（`Start=4`）|
-| `UsoSvc` | Update Orchestrator（Win10 驅動掃描/安裝/重開的主要服務）| 停用 |
-| `WaaSMedicSvc` | Update Medic（會自動把上面兩個「修回」預設，必須一起關）| 停用 |
-
-只改「服務啟動類型」，不刪檔、不動系統元件；原始值會備份到 `revert-data-wu.json`，`Revert-LowSpecPC.ps1` 會完整還原。另外會設 `NoAutoUpdate=1` + `NoAutoRebootWithLoggedOnUsers=1`（家用版當保險，Pro 版則連自動更新也一起停）。**完整生效需重開機一次。**
+services 模式只改「服務啟動類型」，不刪檔、不動系統元件；原始值 + 模式會備份到 `revert-data-wu.json`，`Revert-LowSpecPC.ps1` 依模式完整還原。**services 模式完整生效需重開機一次。**
 
 ### 要更新時：選單 `[6] 開窗更新`
 
-1. 啟動更新服務、開啟「設定 → Windows Update」。
-2. 登記一個 SYSTEM 權限的一次性排程 `\MaintenanceReminder\RelockWindowsUpdate`：**下次開機自動把鎖定補回來**（所以就算更新需要重開機也不怕忘記鎖回）。
-3. 你自己按「檢查更新 → 下載 → 安裝 →（需要時）立即重新開機」。
-4. 若這次沒有要重開機，回到選單提示按 `Y`，立即重新鎖定。
+- **policy 模式**：直接開「設定 → Windows Update」，按「檢查更新 → 下載 → 安裝」；裝完仍維持 `NoAutoUpdate=1`，不用再做動作。
+- **services 模式**：
+  1. 啟動更新服務、開啟「設定 → Windows Update」。
+  2. 登記一個 SYSTEM 權限的一次性排程 `\MaintenanceReminder\RelockWindowsUpdate`：**下次開機自動把鎖定補回來**（就算更新需要重開機也不怕忘記鎖回）。
+  3. 你自己按「檢查更新 → 下載 → 安裝 →（需要時）立即重新開機」。
+  4. 若這次沒有要重開機，回選單提示按 `Y` 立即重新鎖定。
 
-> **資安提醒**：鎖定後 Windows 完全不會自己更新，**請每月用 `[6]` 手動檢查一次**（可搭配 `reminders/` 的每月提醒）。Defender 病毒定義走自己的更新管道，通常不受影響，但建議開窗時順手到「Windows 安全性 → 病毒與威脅防護 → 更新」按一下。
+> **資安提醒**：鎖定後 Windows 不會自己更新，**請每月用 `[6]` 手動檢查一次**（可搭配 `reminders/` 的每月提醒）。Defender 病毒定義走自己的更新管道，通常不受影響，但建議開窗時順手到「Windows 安全性 → 病毒與威脅防護 → 更新」按一下。
 
 ## 🔔 維護提醒（選用元件）
 

@@ -305,13 +305,17 @@ function Remove-Bloatware {
 }
 
 # ----- Windows Update 鎖定：共用工具 -----
-# Windows 10/11 「家用版」沒有「僅通知」原則（AUOptions 只有 Pro 以上版本會生效），
-# 所以這裡改用「停用相關服務」硬擋，讓更新完全不會自己下載/安裝/重開：
-#   wuauserv     Windows Update
-#   UsoSvc       Update Orchestrator（Win10 驅動掃描 / 安裝 / 重開的主要服務）
-#   WaaSMedicSvc Update Medic（會自動把上面兩個「修回」預設值，必須一起關）
-# 全部只改「服務啟動類型」（Start=4 停用），不刪檔、不動系統元件，可完全還原。
-# 要更新時用選單 [6]「開窗更新」暫時解鎖 → 手動裝 → 重開後由排程自動鎖回。
+# 依 Windows 版本分兩種模式（見 Lock-WindowsUpdate）：
+#   policy 模式（Pro / Enterprise / Education）：只設 NoAutoUpdate=1 原則，不碰服務。
+#       這是有支援、有文件的做法，Store / Defender / DISM / 管理層都不受影響。
+#   services 模式（家用版 Core*）：家用版會忽略 AU 原則，只能停用相關服務硬擋：
+#       wuauserv     Windows Update
+#       UsoSvc       Update Orchestrator（Win10 驅動掃描 / 安裝 / 重開的主要服務）
+#       WaaSMedicSvc Update Medic（會自動把上面兩個「修回」預設值，必須一起關）
+#       只改「服務啟動類型」（Start=4 停用），不刪檔、不動系統元件，可完全還原。
+# 兩種模式都：設 NoAutoRebootWithLoggedOnUsers=1；備份原況到 revert-data-wu.json（含 mode）。
+# 要更新時用選單 [6]「開窗更新」：services 模式暫時解鎖 → 手動裝 → 重開後排程自動鎖回；
+# policy 模式則直接開設定頁手動檢查即可（原則不影響手動更新）。
 $script:WULockServices = 'wuauserv', 'UsoSvc', 'WaaSMedicSvc'
 $script:WUBackupFile   = Join-Path $PSScriptRoot 'revert-data-wu.json'
 $script:WUOrchTasks    = @(
@@ -344,44 +348,60 @@ function Set-ServiceStartValue($name, [int]$start) {
     catch { Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\$name" -Name Start -Value $start -Type DWord -ErrorAction Stop }
 }
 
-function Backup-WUState {
+function Get-WUBackup {
+    if (-not (Test-Path $script:WUBackupFile)) { return $null }
+    try { return (Get-Content $script:WUBackupFile -Raw | ConvertFrom-Json) } catch { return $null }
+}
+
+function Backup-WUState($mode) {
     if (Test-Path $script:WUBackupFile) { return }   # 已有備份就不覆蓋（避免第二次執行存到已改過的值）
-    $data = [ordered]@{ capturedAt = (Get-Date).ToString('s') }
+    $data = [ordered]@{ mode = $mode; capturedAt = (Get-Date).ToString('s') }
     foreach ($s in $script:WULockServices) { $data[$s] = [int](Get-ServiceStartValue $s) }
     $data | ConvertTo-Json | Set-Content -Path $script:WUBackupFile -Encoding UTF8
 }
 
+function Set-WUPolicy {
+    $au = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
+    if (-not (Test-Path $au)) { New-Item $au -Force | Out-Null }
+    Set-ItemProperty $au -Name NoAutoUpdate                 -Value 1 -Type DWord
+    Set-ItemProperty $au -Name NoAutoRebootWithLoggedOnUsers -Value 1 -Type DWord
+}
+
 function Lock-WindowsUpdate {
-    Step 12 'Windows Update → 鎖定（停用更新服務，改由你手動開窗更新）'
+    Step 12 'Windows Update → 鎖定（改由你手動更新）'
     $ed = Get-WUPolicySupport
     Log ("    目前版本：$($ed.Caption)（EditionID=$($ed.EditionId)）")
+
+    # ---- policy 模式：Pro / Enterprise / Education，只設原則，不碰服務 ----
     if ($ed.HonorsPolicy) {
-        Log '    你的版本吃「僅通知」原則：其實只要 NoAutoUpdate=1（本工具會設）就能手動更新；' 'Yellow'
-        Log '    下面「停用服務」是更強的選用做法，仍會一併套用。' 'Yellow'
-    } else {
-        WarnMsg '家用版會忽略「僅通知」原則（AUOptions/NoAutoUpdate 都無效），所以改用「停用服務」硬擋。'
-        Log '    較溫和的替代：設定 → Windows Update → 進階選項 →「使用時間」（只能鎖 18 小時窗、' 'DarkGray'
-        Log '    擋不掉 servicing 收尾階段的重開）——本工具不走這條，改停服務。' 'DarkGray'
-    }
-    WarnMsg '不論哪種，資安更新請每月用選單 [6] 手動裝！'
-    if ($script:DryRun) {
-        Log ('    [試跑] 會備份現況並停用：' + ($script:WULockServices -join ', ') + '；設定 NoAutoReboot；盡量停用 UpdateOrchestrator 排程') 'Magenta'
+        Log '    你的版本吃「設定自動更新」原則，只需 NoAutoUpdate=1 即可完全手動更新；不動任何服務。' 'Yellow'
+        WarnMsg '若本機由公司 IT 以 WSUS / Intune 控管，請勿自行鎖定（會與管理原則衝突）。'
+        WarnMsg '資安更新請每月用選單 [6] 手動裝！'
+        if ($script:DryRun) { Log '    [試跑] 會設定 NoAutoUpdate=1 + NoAutoRebootWithLoggedOnUsers=1（policy 模式）' 'Magenta'; return }
+        Backup-WUState 'policy'
+        Do-Change { Set-WUPolicy } '已設定 NoAutoUpdate=1 + 登入中不自動重開（policy 模式，未動服務）'
+        Unregister-ScheduledTask -TaskName 'RelockWindowsUpdate' -TaskPath '\MaintenanceReminder\' -Confirm:$false -EA SilentlyContinue
+        Ok '完成。用「設定 → Windows Update → 檢查更新」即可手動安裝（原則不影響手動更新）。'
         return
     }
-    Backup-WUState
+
+    # ---- services 模式：家用版，停用更新相關服務硬擋 ----
+    WarnMsg '家用版會忽略「設定自動更新」原則（AUOptions/NoAutoUpdate 都無效），所以改用「停用服務」硬擋。'
+    Log '    較溫和的替代：設定 → Windows Update → 進階選項 →「使用時間」（只能鎖 18 小時窗、' 'DarkGray'
+    Log '    擋不掉 servicing 收尾階段的重開）——本工具不走這條，改停服務。' 'DarkGray'
+    WarnMsg '資安更新請每月用選單 [6] 手動裝！'
+    if ($script:DryRun) {
+        Log ('    [試跑] 會備份現況並停用：' + ($script:WULockServices -join ', ') + '；設 NoAutoReboot；盡量停用 UpdateOrchestrator 排程') 'Magenta'
+        return
+    }
+    Backup-WUState 'services'
     foreach ($s in $script:WULockServices) {
         Do-Change {
             Stop-Service $s -Force -ErrorAction SilentlyContinue
             Set-ServiceStartValue $s 4
         } "已停用服務 $s"
     }
-    # 次要保險：萬一日後被大版本更新重新開啟服務，至少不要在登入中自動重開
-    Do-Change {
-        $au = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
-        if (-not (Test-Path $au)) { New-Item $au -Force | Out-Null }
-        Set-ItemProperty $au -Name NoAutoUpdate                 -Value 1 -Type DWord
-        Set-ItemProperty $au -Name NoAutoRebootWithLoggedOnUsers -Value 1 -Type DWord
-    } '已設定 NoAutoUpdate=1 + 登入中不自動重開（Pro 版連自動更新也會一起停）'
+    Do-Change { Set-WUPolicy } '已設定 NoAutoUpdate=1 + 登入中不自動重開（次要保險）'
     # 盡量停用 UpdateOrchestrator 排程（多數受 ACL 保護會失敗；服務已停時它們本來就跑不動）
     $n = 0
     foreach ($t in $script:WUOrchTasks) { try { Disable-ScheduledTask -TaskName $t.N -TaskPath $t.P -EA Stop | Out-Null; $n++ } catch {} }
@@ -392,10 +412,17 @@ function Lock-WindowsUpdate {
 }
 
 function Unlock-WindowsUpdate {
-    # 還原服務啟動類型：優先照備份檔，沒有備份就用 Windows 10 22H2 預設
+    # 暫時解除鎖定：移除 NoAutoUpdate；services 模式再把服務啟動類型還原
+    $au  = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
+    $bak = Get-WUBackup
+    $mode = if ($bak -and $bak.mode) { [string]$bak.mode } else { 'services' }   # 沒有備份就當家用版模式，保守把服務叫回來
+    Remove-ItemProperty $au -Name NoAutoUpdate -ErrorAction SilentlyContinue
+
+    if ($mode -eq 'policy') {
+        Ok '已移除 NoAutoUpdate（policy 模式，未動服務）'
+        return
+    }
     $def = @{ wuauserv = 3; UsoSvc = 2; WaaSMedicSvc = 3 }
-    $bak = $null
-    if (Test-Path $script:WUBackupFile) { try { $bak = Get-Content $script:WUBackupFile -Raw | ConvertFrom-Json } catch {} }
     foreach ($s in $script:WULockServices) {
         $val = if ($bak -and $bak.$s) { [int]$bak.$s } else { [int]$def[$s] }
         try { Set-ServiceStartValue $s $val; Ok "還原服務 $s → Start=$val" }
@@ -407,8 +434,18 @@ function Unlock-WindowsUpdate {
 function Open-WindowsUpdateWindow {
     $script:StepNum = 0
     Log ''
-    Log '=== 開窗更新：暫時解除 Windows Update 鎖定，讓你手動檢查 / 安裝 ===' 'White'
-    if ($script:DryRun) { Log '    [試跑] 會啟動更新服務、開「設定 → Windows Update」，並登記「重開後自動重新鎖定」' 'Magenta'; return }
+    Log '=== 開窗更新：讓你手動檢查 / 安裝 Windows Update ===' 'White'
+    $bak  = Get-WUBackup
+    $mode = if ($bak -and $bak.mode) { [string]$bak.mode } else { 'services' }
+    if ($script:DryRun) { Log "    [試跑] 模式=$mode：policy → 只開設定頁；services → 啟動服務、開設定頁、登記重開後自動重新鎖定" 'Magenta'; return }
+
+    if ($mode -eq 'policy') {
+        Log '    policy 模式：不需解鎖，直接開「設定 → Windows Update」按檢查更新即可。' 'Cyan'
+        Log '    裝完後仍維持 NoAutoUpdate=1（不會自己更新），無需再做任何動作。' 'DarkGray'
+        Start-Process 'ms-settings:windowsupdate'
+        return
+    }
+
     Unlock-WindowsUpdate
     # 登記一次性排程：不論你之後有沒有重開機，都會把鎖定補回來
     try {
@@ -604,9 +641,15 @@ function Get-OptimizationStatus {
     $pf = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management' -EA SilentlyContinue).PagingFiles -join ' ; '
     StatLine '固定分頁檔' ((-not $auto) -and ($pf -match '\s\d+\s+\d+')) $(if ($auto) { '目前=自動管理' } else { "PagingFiles=$pf" })
 
+    $wuEd    = Get-WUPolicySupport
+    $wuNAU   = (Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -EA SilentlyContinue).NoAutoUpdate
     $wuStart = $script:WULockServices | ForEach-Object { [int](Get-ServiceStartValue $_) }
-    $wuLocked = @($wuStart | Where-Object { $_ -ne 4 }).Count -eq 0
-    StatLine 'Windows Update 已鎖定（手動更新）' $wuLocked ("wuauserv/UsoSvc/WaaSMedicSvc Start=" + ($wuStart -join '/') + $(if ($wuLocked) { '' } else { '；4=停用' }))
+    if ($wuEd.HonorsPolicy) {
+        StatLine 'Windows Update 已鎖定（policy 模式，手動更新）' ($wuNAU -eq 1) "NoAutoUpdate=$wuNAU"
+    } else {
+        $wuLocked = (@($wuStart | Where-Object { $_ -ne 4 }).Count -eq 0)
+        StatLine 'Windows Update 已鎖定（services 模式，手動更新）' $wuLocked ("wuauserv/UsoSvc/WaaSMedicSvc Start=" + ($wuStart -join '/') + "；NoAutoUpdate=$wuNAU" + $(if ($wuLocked) { '' } else { '（4=停用）' }))
+    }
 
     $bloat = @('Microsoft.BingNews','Microsoft.BingWeather','Microsoft.BingSports','Microsoft.MicrosoftSolitaireCollection','Microsoft.GetHelp','Microsoft.Getstarted','Microsoft.MicrosoftOfficeHub','Microsoft.People','Microsoft.WindowsFeedbackHub','Microsoft.MixedReality.Portal','Microsoft.3DBuilder','Microsoft.Microsoft3DViewer','Microsoft.Print3D','Microsoft.WindowsMaps','Microsoft.SkypeApp','Microsoft.OneConnect','Microsoft.Wallet','Microsoft.Office.Sway','king.com.CandyCrushSaga','king.com.CandyCrushSodaSaga','A278AB0D.GameloftGames','Flipboard.Flipboard')
     $still = @($bloat | Where-Object { Get-AppxPackage -Name $_ -EA SilentlyContinue })

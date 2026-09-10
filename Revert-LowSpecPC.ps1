@@ -54,29 +54,33 @@ Try-Do 'Storage Sense → 關閉' {
 Try-Do 'Defender 掃描設定 → 預設' {
     Set-MpPreference -EnableLowCpuPriority $false -ScanAvgCPULoadFactor 50 -DisableCpuThrottleOnIdleScans $true -ScanScheduleDay 0 -DisableCatchupQuickScan $false -DisableCatchupFullScan $false -ErrorAction Stop
 }
-Try-Do 'Windows Update → 解除鎖定（還原更新服務 + 移除原則 + 移除自動重鎖排程）' {
-    # 還原被 Lock-WindowsUpdate 停用的服務：優先照 revert-data-wu.json，沒有就用 Win10 22H2 預設
-    $svcDef = [ordered]@{ wuauserv = 3; UsoSvc = 2; WaaSMedicSvc = 3 }
+Try-Do 'Windows Update → 解除鎖定（還原服務/原則 + 移除自動重鎖排程）' {
     $bak = Join-Path $PSScriptRoot 'revert-data-wu.json'
     $saved = $null
     if (Test-Path $bak) { try { $saved = Get-Content $bak -Raw | ConvertFrom-Json } catch {} }
-    foreach ($name in $svcDef.Keys) {
-        $val = if ($saved -and $saved.$name) { [int]$saved.$name } else { [int]$svcDef[$name] }
-        Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\$name" -Name Start -Value $val -Type DWord -ErrorAction SilentlyContinue
-        try { Set-Service -Name $name -StartupType (@{ 2 = 'Automatic'; 3 = 'Manual'; 4 = 'Disabled' }[$val]) -ErrorAction Stop } catch {}
+    $mode = if ($saved -and $saved.mode) { [string]$saved.mode } else { 'services' }   # 沒備份就當 services 模式，保守把服務叫回來
+
+    # services 模式才需要還原服務啟動類型（policy 模式從沒動過服務）
+    if ($mode -ne 'policy') {
+        $svcDef = [ordered]@{ wuauserv = 3; UsoSvc = 2; WaaSMedicSvc = 3 }
+        foreach ($name in $svcDef.Keys) {
+            $val = if ($saved -and $saved.$name) { [int]$saved.$name } else { [int]$svcDef[$name] }
+            Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\$name" -Name Start -Value $val -Type DWord -ErrorAction SilentlyContinue
+            try { Set-Service -Name $name -StartupType (@{ 2 = 'Automatic'; 3 = 'Manual'; 4 = 'Disabled' }[$val]) -ErrorAction Stop } catch {}
+        }
+        Start-Service wuauserv, UsoSvc -ErrorAction SilentlyContinue
+        # 重新啟用先前能停用的 UpdateOrchestrator 排程
+        foreach ($t in @(
+                @{ P = '\Microsoft\Windows\UpdateOrchestrator\'; N = 'Schedule Scan' },
+                @{ P = '\Microsoft\Windows\UpdateOrchestrator\'; N = 'Schedule Scan Static Task' },
+                @{ P = '\Microsoft\Windows\UpdateOrchestrator\'; N = 'UpdateModelTask' },
+                @{ P = '\Microsoft\Windows\UpdateOrchestrator\'; N = 'Reboot' },
+                @{ P = '\Microsoft\Windows\UpdateOrchestrator\'; N = 'Reboot_AC' },
+                @{ P = '\Microsoft\Windows\UpdateOrchestrator\'; N = 'Reboot_Battery' }
+            )) { try { Enable-ScheduledTask -TaskName $t.N -TaskPath $t.P -ErrorAction Stop | Out-Null } catch {} }
     }
-    Start-Service wuauserv, UsoSvc -ErrorAction SilentlyContinue
     # 移除「開機自動重新鎖定」排程
     Unregister-ScheduledTask -TaskName 'RelockWindowsUpdate' -TaskPath '\MaintenanceReminder\' -Confirm:$false -ErrorAction SilentlyContinue
-    # 重新啟用 UpdateOrchestrator 排程（先前能停用的部分）
-    foreach ($t in @(
-            @{ P = '\Microsoft\Windows\UpdateOrchestrator\'; N = 'Schedule Scan' },
-            @{ P = '\Microsoft\Windows\UpdateOrchestrator\'; N = 'Schedule Scan Static Task' },
-            @{ P = '\Microsoft\Windows\UpdateOrchestrator\'; N = 'UpdateModelTask' },
-            @{ P = '\Microsoft\Windows\UpdateOrchestrator\'; N = 'Reboot' },
-            @{ P = '\Microsoft\Windows\UpdateOrchestrator\'; N = 'Reboot_AC' },
-            @{ P = '\Microsoft\Windows\UpdateOrchestrator\'; N = 'Reboot_Battery' }
-        )) { try { Enable-ScheduledTask -TaskName $t.N -TaskPath $t.P -ErrorAction Stop | Out-Null } catch {} }
     # 移除所有 WindowsUpdate 原則（含 NoAutoUpdate / NoAutoRebootWithLoggedOnUsers 等）
     Remove-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item $bak -Force -ErrorAction SilentlyContinue
