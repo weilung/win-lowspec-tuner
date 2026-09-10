@@ -327,6 +327,17 @@ function Get-ServiceStartValue($name) {
     (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\$name" -Name Start -EA SilentlyContinue).Start
 }
 
+function Get-WUPolicySupport {
+    # 家用版 (EditionID = Core*) 會忽略 WindowsUpdate\AU 原則；Pro / Enterprise / Education 等會生效
+    $ed  = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name EditionID -EA SilentlyContinue).EditionID
+    $cap = (Get-CimInstance Win32_OperatingSystem -EA SilentlyContinue).Caption
+    [pscustomobject]@{
+        EditionId    = $ed
+        Caption      = ($cap -replace '^Microsoft ', '')
+        HonorsPolicy = [bool]($ed -and $ed -notlike 'Core*')
+    }
+}
+
 function Set-ServiceStartValue($name, [int]$start) {
     # 先試正規做法；UsoSvc / WaaSMedicSvc 的 DACL 會擋 Set-Service，改直接寫登錄 Start
     try { Set-Service -Name $name -StartupType (@{ 2 = 'Automatic'; 3 = 'Manual'; 4 = 'Disabled' }[$start]) -ErrorAction Stop }
@@ -342,7 +353,17 @@ function Backup-WUState {
 
 function Lock-WindowsUpdate {
     Step 12 'Windows Update → 鎖定（停用更新服務，改由你手動開窗更新）'
-    WarnMsg '家用版無「僅通知」原則，這裡用停用服務硬擋；資安更新請每月用選單 [6] 手動裝！'
+    $ed = Get-WUPolicySupport
+    Log ("    目前版本：$($ed.Caption)（EditionID=$($ed.EditionId)）")
+    if ($ed.HonorsPolicy) {
+        Log '    你的版本吃「僅通知」原則：其實只要 NoAutoUpdate=1（本工具會設）就能手動更新；' 'Yellow'
+        Log '    下面「停用服務」是更強的選用做法，仍會一併套用。' 'Yellow'
+    } else {
+        WarnMsg '家用版會忽略「僅通知」原則（AUOptions/NoAutoUpdate 都無效），所以改用「停用服務」硬擋。'
+        Log '    較溫和的替代：設定 → Windows Update → 進階選項 →「使用時間」（只能鎖 18 小時窗、' 'DarkGray'
+        Log '    擋不掉 servicing 收尾階段的重開）——本工具不走這條，改停服務。' 'DarkGray'
+    }
+    WarnMsg '不論哪種，資安更新請每月用選單 [6] 手動裝！'
     if ($script:DryRun) {
         Log ('    [試跑] 會備份現況並停用：' + ($script:WULockServices -join ', ') + '；設定 NoAutoReboot；盡量停用 UpdateOrchestrator 排程') 'Magenta'
         return
