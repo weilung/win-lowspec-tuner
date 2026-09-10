@@ -4,16 +4,18 @@
 .DESCRIPTION
     針對「記憶體小 / 傳統硬碟(HDD) / 老筆電」的 Windows 進行一系列安全、可還原的調校。
     會自動偵測系統碟是 HDD 還是 SSD：HDD 才重組，SSD 只做 TRIM。
-    危險或屬於個人偏好的項目（移除內建 App、改 Windows Update、固定分頁檔）列為「選用」，會先詢問。
+    危險或屬於個人偏好的項目（移除內建 App、鎖定 Windows Update、固定分頁檔）列為「選用」，會先詢問。
+    鎖定 Windows Update 後，用選單 [6]「開窗更新」暫時解鎖手動安裝，重開機後由排程自動鎖回。
 .NOTES
     需以系統管理員身分執行；建議用 Windows PowerShell 5.1。
     還原請執行同資料夾的 Revert-LowSpecPC.ps1。
 #>
 [CmdletBinding()]
 param(
-    [switch]$Recommended,     # 直接套用建議的安全項目（不進選單）
-    [switch]$IncludeOptional, # 連同選用項目（會逐項確認）
-    [switch]$DryRun           # 只顯示會做什麼，不實際變更
+    [switch]$Recommended,        # 直接套用建議的安全項目（不進選單）
+    [switch]$IncludeOptional,    # 連同選用項目（會逐項確認）
+    [switch]$DryRun,             # 只顯示會做什麼，不實際變更
+    [switch]$LockWindowsUpdate   # 內部用：只重新鎖定 Windows Update（供 RelockWindowsUpdate 排程呼叫）
 )
 
 # ---- 確保以 Windows PowerShell 5.1 + 系統管理員身分執行 ----
@@ -302,15 +304,110 @@ function Remove-Bloatware {
     Log "    共移除 $removed 個（共勾選 $($ids.Count) 個）。需要可從 Microsoft Store 重新安裝。"
 }
 
-function Set-WindowsUpdateNotify {
-    Step 12 'Windows Update → 僅通知、手動才下載安裝（選用）'
-    WarnMsg '這只是停掉「自動」更新，資安更新仍請定期手動安裝！'
+# ----- Windows Update 鎖定：共用工具 -----
+# Windows 10/11 「家用版」沒有「僅通知」原則（AUOptions 只有 Pro 以上版本會生效），
+# 所以這裡改用「停用相關服務」硬擋，讓更新完全不會自己下載/安裝/重開：
+#   wuauserv     Windows Update
+#   UsoSvc       Update Orchestrator（Win10 驅動掃描 / 安裝 / 重開的主要服務）
+#   WaaSMedicSvc Update Medic（會自動把上面兩個「修回」預設值，必須一起關）
+# 全部只改「服務啟動類型」（Start=4 停用），不刪檔、不動系統元件，可完全還原。
+# 要更新時用選單 [6]「開窗更新」暫時解鎖 → 手動裝 → 重開後由排程自動鎖回。
+$script:WULockServices = 'wuauserv', 'UsoSvc', 'WaaSMedicSvc'
+$script:WUBackupFile   = Join-Path $PSScriptRoot 'revert-data-wu.json'
+$script:WUOrchTasks    = @(
+    @{ P = '\Microsoft\Windows\UpdateOrchestrator\'; N = 'Schedule Scan' },
+    @{ P = '\Microsoft\Windows\UpdateOrchestrator\'; N = 'Schedule Scan Static Task' },
+    @{ P = '\Microsoft\Windows\UpdateOrchestrator\'; N = 'UpdateModelTask' },
+    @{ P = '\Microsoft\Windows\UpdateOrchestrator\'; N = 'Reboot' },
+    @{ P = '\Microsoft\Windows\UpdateOrchestrator\'; N = 'Reboot_AC' },
+    @{ P = '\Microsoft\Windows\UpdateOrchestrator\'; N = 'Reboot_Battery' }
+)
+
+function Get-ServiceStartValue($name) {
+    (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\$name" -Name Start -EA SilentlyContinue).Start
+}
+
+function Set-ServiceStartValue($name, [int]$start) {
+    # 先試正規做法；UsoSvc / WaaSMedicSvc 的 DACL 會擋 Set-Service，改直接寫登錄 Start
+    try { Set-Service -Name $name -StartupType (@{ 2 = 'Automatic'; 3 = 'Manual'; 4 = 'Disabled' }[$start]) -ErrorAction Stop }
+    catch { Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\$name" -Name Start -Value $start -Type DWord -ErrorAction Stop }
+}
+
+function Backup-WUState {
+    if (Test-Path $script:WUBackupFile) { return }   # 已有備份就不覆蓋（避免第二次執行存到已改過的值）
+    $data = [ordered]@{ capturedAt = (Get-Date).ToString('s') }
+    foreach ($s in $script:WULockServices) { $data[$s] = [int](Get-ServiceStartValue $s) }
+    $data | ConvertTo-Json | Set-Content -Path $script:WUBackupFile -Encoding UTF8
+}
+
+function Lock-WindowsUpdate {
+    Step 12 'Windows Update → 鎖定（停用更新服務，改由你手動開窗更新）'
+    WarnMsg '家用版無「僅通知」原則，這裡用停用服務硬擋；資安更新請每月用選單 [6] 手動裝！'
+    if ($script:DryRun) {
+        Log ('    [試跑] 會備份現況並停用：' + ($script:WULockServices -join ', ') + '；設定 NoAutoReboot；盡量停用 UpdateOrchestrator 排程') 'Magenta'
+        return
+    }
+    Backup-WUState
+    foreach ($s in $script:WULockServices) {
+        Do-Change {
+            Stop-Service $s -Force -ErrorAction SilentlyContinue
+            Set-ServiceStartValue $s 4
+        } "已停用服務 $s"
+    }
+    # 次要保險：萬一日後被大版本更新重新開啟服務，至少不要在登入中自動重開
     Do-Change {
         $au = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
         if (-not (Test-Path $au)) { New-Item $au -Force | Out-Null }
-        Set-ItemProperty $au -Name NoAutoUpdate -Value 0 -Type DWord
-        Set-ItemProperty $au -Name AUOptions   -Value 2 -Type DWord
-    } '已設為 AUOptions=2（下載與安裝前都先通知；需重開機生效）'
+        Set-ItemProperty $au -Name NoAutoUpdate                 -Value 1 -Type DWord
+        Set-ItemProperty $au -Name NoAutoRebootWithLoggedOnUsers -Value 1 -Type DWord
+    } '已設定 NoAutoUpdate=1 + 登入中不自動重開（Pro 版連自動更新也會一起停）'
+    # 盡量停用 UpdateOrchestrator 排程（多數受 ACL 保護會失敗；服務已停時它們本來就跑不動）
+    $n = 0
+    foreach ($t in $script:WUOrchTasks) { try { Disable-ScheduledTask -TaskName $t.N -TaskPath $t.P -EA Stop | Out-Null; $n++ } catch {} }
+    Log "    另停用 $n / $($script:WUOrchTasks.Count) 個 UpdateOrchestrator 排程（受保護的失敗屬正常）" 'DarkGray'
+    # 若這次是排程觸發的「重新鎖定」，用完就自我刪除
+    Unregister-ScheduledTask -TaskName 'RelockWindowsUpdate' -TaskPath '\MaintenanceReminder\' -Confirm:$false -EA SilentlyContinue
+    WarnMsg '完整生效需重開機一次（鎖定前若服務正在跑，重開後才會真的不啟動）'
+}
+
+function Unlock-WindowsUpdate {
+    # 還原服務啟動類型：優先照備份檔，沒有備份就用 Windows 10 22H2 預設
+    $def = @{ wuauserv = 3; UsoSvc = 2; WaaSMedicSvc = 3 }
+    $bak = $null
+    if (Test-Path $script:WUBackupFile) { try { $bak = Get-Content $script:WUBackupFile -Raw | ConvertFrom-Json } catch {} }
+    foreach ($s in $script:WULockServices) {
+        $val = if ($bak -and $bak.$s) { [int]$bak.$s } else { [int]$def[$s] }
+        try { Set-ServiceStartValue $s $val; Ok "還原服務 $s → Start=$val" }
+        catch { WarnMsg "還原 $s 失敗：$($_.Exception.Message)" }
+    }
+    Start-Service wuauserv, UsoSvc -ErrorAction SilentlyContinue
+}
+
+function Open-WindowsUpdateWindow {
+    $script:StepNum = 0
+    Log ''
+    Log '=== 開窗更新：暫時解除 Windows Update 鎖定，讓你手動檢查 / 安裝 ===' 'White'
+    if ($script:DryRun) { Log '    [試跑] 會啟動更新服務、開「設定 → Windows Update」，並登記「重開後自動重新鎖定」' 'Magenta'; return }
+    Unlock-WindowsUpdate
+    # 登記一次性排程：不論你之後有沒有重開機，都會把鎖定補回來
+    try {
+        $ps  = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
+        $arg = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -LockWindowsUpdate' -f $PSCommandPath
+        $act = New-ScheduledTaskAction -Execute $ps -Argument $arg
+        $trg = New-ScheduledTaskTrigger -AtStartup
+        $prn = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
+        $set = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+        Register-ScheduledTask -TaskName 'RelockWindowsUpdate' -TaskPath '\MaintenanceReminder\' -Action $act -Trigger $trg -Principal $prn -Settings $set -Force | Out-Null
+        Ok '已登記：下次開機自動重新鎖定 Windows Update'
+    } catch { WarnMsg "登記自動重新鎖定失敗（$($_.Exception.Message)）；裝完更新記得手動用選單重新鎖定" }
+    Start-Process 'ms-settings:windowsupdate'
+    Log ''
+    Log '    在「設定 → Windows Update」按「檢查更新」→ 下載 → 安裝 →（需要時）立即重新開機。' 'Cyan'
+    Log '    順手到「Windows 安全性 → 病毒與威脅防護 → 更新」按一下檢查病毒定義。' 'DarkGray'
+    Log ''
+    $ans = Read-Host '    更新都裝好、且「不需要」重開機了嗎？現在就重新鎖定按 Y；等等要重開機按 N（重開後排程會自動鎖回）'
+    if ($ans -match '^[Yy]') { Lock-WindowsUpdate }
+    else { Log '    保持解鎖，等你重開機後由排程自動重新鎖定。' 'Yellow' }
 }
 
 function Set-FixedPageFile {
@@ -486,8 +583,9 @@ function Get-OptimizationStatus {
     $pf = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management' -EA SilentlyContinue).PagingFiles -join ' ; '
     StatLine '固定分頁檔' ((-not $auto) -and ($pf -match '\s\d+\s+\d+')) $(if ($auto) { '目前=自動管理' } else { "PagingFiles=$pf" })
 
-    $au = (Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -EA SilentlyContinue).AUOptions
-    StatLine 'Windows Update = 僅通知' ($au -eq 2) $(if ($au) { "AUOptions=$au" } else { '未設定（仍自動更新）' })
+    $wuStart = $script:WULockServices | ForEach-Object { [int](Get-ServiceStartValue $_) }
+    $wuLocked = @($wuStart | Where-Object { $_ -ne 4 }).Count -eq 0
+    StatLine 'Windows Update 已鎖定（手動更新）' $wuLocked ("wuauserv/UsoSvc/WaaSMedicSvc Start=" + ($wuStart -join '/') + $(if ($wuLocked) { '' } else { '；4=停用' }))
 
     $bloat = @('Microsoft.BingNews','Microsoft.BingWeather','Microsoft.BingSports','Microsoft.MicrosoftSolitaireCollection','Microsoft.GetHelp','Microsoft.Getstarted','Microsoft.MicrosoftOfficeHub','Microsoft.People','Microsoft.WindowsFeedbackHub','Microsoft.MixedReality.Portal','Microsoft.3DBuilder','Microsoft.Microsoft3DViewer','Microsoft.Print3D','Microsoft.WindowsMaps','Microsoft.SkypeApp','Microsoft.OneConnect','Microsoft.Wallet','Microsoft.Office.Sway','king.com.CandyCrushSaga','king.com.CandyCrushSodaSaga','A278AB0D.GameloftGames','Flipboard.Flipboard')
     $still = @($bloat | Where-Object { Get-AppxPackage -Name $_ -EA SilentlyContinue })
@@ -535,7 +633,7 @@ function Apply-Optional {
     $opts = @(
         @{ Name = '移除內建肥大 App';            Func = { Remove-Bloatware } },
         @{ Name = '停用開機自動啟動程式';        Func = { Manage-StartupApps } },
-        @{ Name = 'Windows Update 改為僅通知';   Func = { Set-WindowsUpdateNotify } },
+        @{ Name = 'Windows Update → 鎖定（手動更新）'; Func = { Lock-WindowsUpdate } },
         @{ Name = '固定分頁檔大小';              Func = { Set-FixedPageFile } }
     )
     foreach ($o in $opts) {
@@ -550,7 +648,7 @@ function Show-OptionalDryRun {
     Log '--- 選用項目（試跑；實際執行請用選單 [2]，會逐項詢問） ---' 'White'
     Remove-Bloatware
     Manage-StartupApps
-    Set-WindowsUpdateNotify
+    Lock-WindowsUpdate
     Set-FixedPageFile
 }
 
@@ -561,7 +659,12 @@ $ram = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory 
 Log ("系統碟 $env:SystemDrive：$media ｜ 記憶體：${ram}GB ｜ PowerShell：$($PSVersionTable.PSVersion)") 'White'
 Log ("記錄檔：$script:LogFile") 'DarkGray'
 
-if ($DryRun) {
+if ($LockWindowsUpdate) {
+    # 供 \MaintenanceReminder\RelockWindowsUpdate 排程於開機時呼叫；純鎖定、不進選單
+    $script:StepNum = 0
+    Lock-WindowsUpdate
+}
+elseif ($DryRun) {
     Apply-Recommended
     Show-OptionalDryRun
     Log ''
@@ -582,6 +685,7 @@ else {
         Log '  [3] 試跑（只顯示會做什麼，不變更）'
         Log '  [4] 還原為 Windows 預設'
         Log '  [5] 檢查目前最佳化狀態（只看不改）'
+        Log '  [6] 開窗更新（暫時解鎖 Windows Update → 手動裝 → 重開後自動鎖回）'
         Log '  [Q] 離開'
         $c = Read-Host '輸入選項'
         switch ($c) {
@@ -593,6 +697,7 @@ else {
                     if (Test-Path $rev) { & $rev } else { WarnMsg '找不到 Revert-LowSpecPC.ps1' }
                 }
             '5' { Get-OptimizationStatus }
+            '6' { Open-WindowsUpdateWindow }
             default { if ($c -notmatch '^[Qq]$') { WarnMsg '無效選項' } }
         }
     } while ($c -notmatch '^[Qq]$')

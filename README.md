@@ -41,6 +41,7 @@
    - `[3]` 試跑（只顯示會做什麼，**含選用項目**，完全不變更）
    - `[4]` 還原為 Windows 預設
    - `[5]` 檢查目前最佳化狀態（只看不改）
+   - `[6]` 開窗更新（暫時解鎖 Windows Update → 你手動裝 → 重開機後自動鎖回）
 
 ## 🔧 包含的最佳化
 
@@ -60,12 +61,35 @@
 | 停用相容性評估排程 | 砍掉 CompatTelRunner 等背景耗能工作 | 安全 | Revert |
 | 移除內建肥大 App | 省空間、開始功能表更乾淨 | **選用** | 從 Store 重裝 |
 | 停用開機自動啟動程式 | 勾選式，減少開機搶硬碟與常駐 RAM | **選用** | Revert / 工作管理員 |
-| Windows Update → 僅通知 | 自己決定何時更新 | **選用** | Revert |
+| Windows Update → 鎖定 | 停用更新服務，完全由你挑時間手動裝（附「開窗更新」） | **選用** | Revert |
 | 固定分頁檔 | HDD 上減少破碎、避免臨時長大卡頓 | **選用** | Revert |
 
 > 「Defender 掃描溫和化」只是降低排程掃描的 CPU 優先權與用量，**即時防護全程開著**，不會降低防毒能力。
 
 > 「停用開機自動啟動程式」只處理可安全還原的兩類：登錄 `Run` 機碼 + 「啟動」資料夾。**Store/UWP App（如 ChatGPT）、Windows 服務（如 FortiClient）、工作排程登入觸發** 不在此功能範圍內 —— 那些請用「工作管理員 → 啟動」分頁或 `services.msc` 處理。
+
+## 🔒 Windows Update → 鎖定（選用）與「開窗更新」
+
+**家用版（Home）沒有「僅通知」的群組原則**——`AUOptions` 這條原則只有 Pro／Enterprise／Education 會生效，家用版寫了也被忽略，更新照樣自動下載、安裝、重開機。
+
+所以這個選用項目（選單 `[2]` 或 `[6]` 之外，套用在 `[2]`）改用**停用更新相關服務**來硬擋：
+
+| 服務 | 用途 | 鎖定後 |
+|---|---|---|
+| `wuauserv` | Windows Update | 停用（`Start=4`）|
+| `UsoSvc` | Update Orchestrator（Win10 驅動掃描/安裝/重開的主要服務）| 停用 |
+| `WaaSMedicSvc` | Update Medic（會自動把上面兩個「修回」預設，必須一起關）| 停用 |
+
+只改「服務啟動類型」，不刪檔、不動系統元件；原始值會備份到 `revert-data-wu.json`，`Revert-LowSpecPC.ps1` 會完整還原。另外會設 `NoAutoUpdate=1` + `NoAutoRebootWithLoggedOnUsers=1`（家用版當保險，Pro 版則連自動更新也一起停）。**完整生效需重開機一次。**
+
+### 要更新時：選單 `[6] 開窗更新`
+
+1. 啟動更新服務、開啟「設定 → Windows Update」。
+2. 登記一個 SYSTEM 權限的一次性排程 `\MaintenanceReminder\RelockWindowsUpdate`：**下次開機自動把鎖定補回來**（所以就算更新需要重開機也不怕忘記鎖回）。
+3. 你自己按「檢查更新 → 下載 → 安裝 →（需要時）立即重新開機」。
+4. 若這次沒有要重開機，回到選單提示按 `Y`，立即重新鎖定。
+
+> **資安提醒**：鎖定後 Windows 完全不會自己更新，**請每月用 `[6]` 手動檢查一次**（可搭配 `reminders/` 的每月提醒）。Defender 病毒定義走自己的更新管道，通常不受影響，但建議開窗時順手到「Windows 安全性 → 病毒與威脅防護 → 更新」按一下。
 
 ## 🔔 維護提醒（選用元件）
 
@@ -87,7 +111,7 @@ powershell -ExecutionPolicy Bypass -File .\reminders\Install-Reminders.ps1 -Unin
 powershell -ExecutionPolicy Bypass -File .\Revert-LowSpecPC.ps1
 ```
 
-會把上述設定還原為 Windows 預設。**注意**：被移除的內建 App 需自行從 Microsoft Store 重新安裝；磁碟最佳化（重組/TRIM）不需要還原。
+會把上述設定還原為 Windows 預設，包含**重新啟用 Windows Update 服務**（`wuauserv` / `UsoSvc` / `WaaSMedicSvc`）、移除自動重鎖排程與所有 WindowsUpdate 原則。**注意**：被移除的內建 App 需自行從 Microsoft Store 重新安裝；磁碟最佳化（重組/TRIM）不需要還原。
 
 ## 💡 真正的天花板：硬體
 

@@ -3,7 +3,7 @@
     將 Optimize-LowSpecPC.ps1 套用的設定還原為 Windows 預設。
 .DESCRIPTION
     把電源、視覺效果、服務、背景應用、Storage Sense、Defender 掃描、Windows Update、分頁檔
-    還原為 Windows 出廠預設值。
+    還原為 Windows 出廠預設值（含重新啟用 Windows Update 服務、移除自動重鎖排程）。
 .PARAMETER IncludeReminders
     一併移除 reminders\Install-Reminders.ps1 建立的提醒排程。
 .NOTES
@@ -54,8 +54,32 @@ Try-Do 'Storage Sense → 關閉' {
 Try-Do 'Defender 掃描設定 → 預設' {
     Set-MpPreference -EnableLowCpuPriority $false -ScanAvgCPULoadFactor 50 -DisableCpuThrottleOnIdleScans $true -ScanScheduleDay 0 -DisableCatchupQuickScan $false -DisableCatchupFullScan $false -ErrorAction Stop
 }
-Try-Do 'Windows Update → 恢復自動（移除原則）' {
+Try-Do 'Windows Update → 解除鎖定（還原更新服務 + 移除原則 + 移除自動重鎖排程）' {
+    # 還原被 Lock-WindowsUpdate 停用的服務：優先照 revert-data-wu.json，沒有就用 Win10 22H2 預設
+    $svcDef = [ordered]@{ wuauserv = 3; UsoSvc = 2; WaaSMedicSvc = 3 }
+    $bak = Join-Path $PSScriptRoot 'revert-data-wu.json'
+    $saved = $null
+    if (Test-Path $bak) { try { $saved = Get-Content $bak -Raw | ConvertFrom-Json } catch {} }
+    foreach ($name in $svcDef.Keys) {
+        $val = if ($saved -and $saved.$name) { [int]$saved.$name } else { [int]$svcDef[$name] }
+        Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\$name" -Name Start -Value $val -Type DWord -ErrorAction SilentlyContinue
+        try { Set-Service -Name $name -StartupType (@{ 2 = 'Automatic'; 3 = 'Manual'; 4 = 'Disabled' }[$val]) -ErrorAction Stop } catch {}
+    }
+    Start-Service wuauserv, UsoSvc -ErrorAction SilentlyContinue
+    # 移除「開機自動重新鎖定」排程
+    Unregister-ScheduledTask -TaskName 'RelockWindowsUpdate' -TaskPath '\MaintenanceReminder\' -Confirm:$false -ErrorAction SilentlyContinue
+    # 重新啟用 UpdateOrchestrator 排程（先前能停用的部分）
+    foreach ($t in @(
+            @{ P = '\Microsoft\Windows\UpdateOrchestrator\'; N = 'Schedule Scan' },
+            @{ P = '\Microsoft\Windows\UpdateOrchestrator\'; N = 'Schedule Scan Static Task' },
+            @{ P = '\Microsoft\Windows\UpdateOrchestrator\'; N = 'UpdateModelTask' },
+            @{ P = '\Microsoft\Windows\UpdateOrchestrator\'; N = 'Reboot' },
+            @{ P = '\Microsoft\Windows\UpdateOrchestrator\'; N = 'Reboot_AC' },
+            @{ P = '\Microsoft\Windows\UpdateOrchestrator\'; N = 'Reboot_Battery' }
+        )) { try { Enable-ScheduledTask -TaskName $t.N -TaskPath $t.P -ErrorAction Stop | Out-Null } catch {} }
+    # 移除所有 WindowsUpdate 原則（含 NoAutoUpdate / NoAutoRebootWithLoggedOnUsers 等）
     Remove-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item $bak -Force -ErrorAction SilentlyContinue
 }
 Try-Do '分頁檔 → 自動管理' {
     $cs = Get-CimInstance Win32_ComputerSystem
