@@ -52,7 +52,9 @@ Try-Do 'Storage Sense → 關閉' {
     Set-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\StorageSense\Parameters\StoragePolicy' -Name '01' -Value 0 -Type DWord -ErrorAction SilentlyContinue
 }
 Try-Do 'Defender 掃描設定 → 預設' {
-    Set-MpPreference -EnableLowCpuPriority $false -ScanAvgCPULoadFactor 50 -DisableCpuThrottleOnIdleScans $true -ScanScheduleDay 0 -DisableCatchupQuickScan $false -DisableCatchupFullScan $false -ErrorAction Stop
+    # 只還原 Set-DefenderGentle 改過的三項。排程日與補掃（ScanScheduleDay / DisableCatchup*）本工具從沒動過，不該在這裡重設：
+    # 官方文件的預設是 ScanScheduleDay=8（從不排程）、DisableCatchupQuickScan=True，寫成 0 / $false 反而會開啟每日排程掃描與補掃。
+    Set-MpPreference -EnableLowCpuPriority $false -ScanAvgCPULoadFactor 50 -DisableCpuThrottleOnIdleScans $true -ErrorAction Stop
 }
 Try-Do 'Windows Update → 解除鎖定（還原服務/原則 + 移除自動重鎖排程）' {
     $bak = Join-Path $PSScriptRoot 'revert-data-wu.json'
