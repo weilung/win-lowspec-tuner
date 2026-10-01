@@ -7,7 +7,7 @@ net session >nul 2>&1
 if %errorlevel% neq 0 (
     echo.
     echo   本工具需要系統管理員權限。
-    echo   接下來會跳出「使用者帳戶控制 (UAC)」視窗，請按「是」。
+    echo   接下來會跳出「使用者帳戶控制 ^(UAC^)」視窗，請按「是」。
     echo.
     powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs" >nul 2>&1
     exit /b
