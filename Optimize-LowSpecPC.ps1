@@ -585,6 +585,54 @@ function Manage-StartupApps {
     }
 }
 
+# 回傳不能排除的理由；可以排除則回傳 $null。$norm 須為 GetFullPath 結果（磁碟根目錄保留結尾 \）。
+function Get-ExclusionProblem ([string]$norm) {
+    $covers = { param($parent, $child) ($child.TrimEnd('\') + '\').StartsWith(($parent.TrimEnd('\') + '\'), [StringComparison]::OrdinalIgnoreCase) }
+    $dl = [Environment]::ExpandEnvironmentVariables([string](Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders' -EA SilentlyContinue).'{374DE290-123F-4565-9164-39C4925E467B}')
+    if (-not $dl) { $dl = Join-Path $env:USERPROFILE 'Downloads' }
+    if (& $covers $norm $dl)        { return '涵蓋「下載」資料夾（外來檔案最常落腳處），不允許' }
+    if (& $covers $norm $env:WINDIR) { return '涵蓋 Windows 資料夾，不允許' }
+    if ($norm -match '^[A-Za-z]:\\$') {
+        $disk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}'" -f $norm.Substring(0, 2)) -ErrorAction SilentlyContinue
+        if (-not $disk -or $disk.DriveType -ne 3) { return '不是內接固定磁碟（外接碟/網路磁碟不允許整顆排除）' }
+    }
+    return $null
+}
+
+function Set-DefenderExclusions {
+    Step 15 'Defender 排除資料夾（選用；排除處的檔案不再被即時掃描與排程掃描）'
+    if ($script:DryRun) { Log '    [試跑] 會詢問要排除的路徑，並用 Add-MpPreference -ExclusionPath 加入' 'Magenta'; return }
+    Log '    適合：開發目錄（git / node_modules / build 輸出）這類檔案多又常改、即時掃描最耗資源的地方。' 'DarkGray'
+    Log '    不允許：涵蓋「下載」資料夾或 Windows 資料夾的路徑。整顆磁碟（如 D:\）須再確認一次。' 'DarkGray'
+    $raw = Read-Host '    輸入要排除的路徑（多個用 ; 分隔，例如 D:\Workshops；直接 Enter 略過）'
+    if (-not $raw -or -not $raw.Trim()) { Skip '未輸入路徑'; return }
+    try { $existing = @((Get-MpPreference -ErrorAction Stop).ExclusionPath) } catch { WarnMsg ('無法讀取 Defender 設定：' + $_.Exception.Message); return }
+    $added = @()
+    foreach ($item in ($raw -split ';' | ForEach-Object { $_.Trim().Trim('"') } | Where-Object { $_ })) {
+        try { $norm = [IO.Path]::GetFullPath($item) } catch { WarnMsg "路徑格式不正確，略過：$item"; continue }
+        $isRoot = $norm -match '^[A-Za-z]:\\$'
+        if (-not $isRoot) { $norm = $norm.TrimEnd('\') }
+        if (-not (Test-Path -LiteralPath $norm -PathType Container)) { WarnMsg "找不到資料夾，略過：$norm"; continue }
+        $why = Get-ExclusionProblem $norm
+        if ($why) { WarnMsg "略過 ${norm}：$why"; continue }
+        if ($existing | Where-Object { $_ -and $_.TrimEnd('\') -ieq $norm.TrimEnd('\') }) { Skip "已在排除清單：$norm"; continue }
+        if ($isRoot -and (Read-Host "    $norm 是整顆磁碟，之後裡面任何檔案都不會被 Defender 掃描。確定排除？(y/N)") -notmatch '^[Yy]') { Skip "使用者略過：$norm"; continue }
+        try {
+            Add-MpPreference -ExclusionPath $norm -ErrorAction Stop
+            if (@((Get-MpPreference).ExclusionPath) | Where-Object { $_ -and $_.TrimEnd('\') -ieq $norm.TrimEnd('\') }) { Ok "已加入排除：$norm"; $added += $norm }
+            else { WarnMsg "指令沒有報錯但清單中找不到 $norm（可能被竄改防護擋下）" }
+        } catch { WarnMsg "加入失敗 ${norm}：$($_.Exception.Message)" }
+    }
+    if ($added.Count) {
+        $bf = Join-Path $PSScriptRoot 'revert-data-defender.json'
+        $all = @()
+        if (Test-Path $bf) { try { $all = @((Get-Content $bf -Raw | ConvertFrom-Json).paths) } catch { $all = @() } }
+        $all += $added
+        @{ paths = @($all | Sort-Object -Unique) } | ConvertTo-Json | Set-Content -Path $bf -Encoding UTF8
+        Log "    共加入 $($added.Count) 個排除路徑；執行 Revert-LowSpecPC.ps1 只會移除本工具加入的這些。"
+    }
+}
+
 # ========================= 狀態檢查（只讀，不變更） =========================
 function StatLine ($name, $isOn, $detail = '') {
     $mark  = if ($isOn) { '[ 已套用 ]' } else { '[ 未套用 ]' }
@@ -658,6 +706,10 @@ function Get-OptimizationStatus {
     $sd = @(Get-StartupEntries | Where-Object { $_.Disabled }).Count
     StatLine '已停用部分開機程式' ($sd -gt 0) "目前停用 $sd 個（依個人需求，非必做）"
 
+    $excFile = Join-Path $PSScriptRoot 'revert-data-defender.json'
+    $excPaths = @(); if (Test-Path $excFile) { try { $excPaths = @((Get-Content $excFile -Raw | ConvertFrom-Json).paths) } catch {} }
+    StatLine 'Defender 排除資料夾（本工具加入）' ($excPaths.Count -gt 0) $(if ($excPaths.Count) { $excPaths -join ' ; ' } else { '尚未設定（依個人需求，非必做）' })
+
     Log ''
     Log '  [已套用]=綠色已生效；[未套用]=灰色。選用項目沒做是正常的。' 'DarkGray'
     Log '  (固定分頁檔/WU 設定值會立即顯示為已套用，但實際效果需重開機。)' 'DarkGray'
@@ -698,7 +750,8 @@ function Apply-Optional {
         @{ Name = '移除內建肥大 App';            Func = { Remove-Bloatware } },
         @{ Name = '停用開機自動啟動程式';        Func = { Manage-StartupApps } },
         @{ Name = 'Windows Update → 鎖定（手動更新）'; Func = { Lock-WindowsUpdate } },
-        @{ Name = '固定分頁檔大小';              Func = { Set-FixedPageFile } }
+        @{ Name = '固定分頁檔大小';              Func = { Set-FixedPageFile } },
+        @{ Name = 'Defender 排除資料夾（開發目錄等）'; Func = { Set-DefenderExclusions } }
     )
     foreach ($o in $opts) {
         $ans = Read-Host ("是否執行：{0}？(y/N)" -f $o.Name)
@@ -714,6 +767,7 @@ function Show-OptionalDryRun {
     Manage-StartupApps
     Lock-WindowsUpdate
     Set-FixedPageFile
+    Set-DefenderExclusions
 }
 
 # ---- 主程式 ----

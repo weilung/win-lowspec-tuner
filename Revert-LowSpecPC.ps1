@@ -56,6 +56,13 @@ Try-Do 'Defender 掃描設定 → 預設' {
     # 官方文件的預設是 ScanScheduleDay=8（從不排程）、DisableCatchupQuickScan=True，寫成 0 / $false 反而會開啟每日排程掃描與補掃。
     Set-MpPreference -EnableLowCpuPriority $false -ScanAvgCPULoadFactor 50 -DisableCpuThrottleOnIdleScans $true -ErrorAction Stop
 }
+Try-Do 'Defender 排除資料夾 → 移除本工具加入的項目（依備份檔 revert-data-defender.json）' {
+    $bf = Join-Path $PSScriptRoot 'revert-data-defender.json'
+    if (Test-Path $bf) {
+        foreach ($p in @((Get-Content $bf -Raw | ConvertFrom-Json).paths)) { Remove-MpPreference -ExclusionPath $p -ErrorAction Stop }
+        Remove-Item $bf -Force -ErrorAction SilentlyContinue
+    }
+}
 Try-Do 'Windows Update → 解除鎖定（還原服務/原則 + 移除自動重鎖排程）' {
     $bak = Join-Path $PSScriptRoot 'revert-data-wu.json'
     $saved = $null
