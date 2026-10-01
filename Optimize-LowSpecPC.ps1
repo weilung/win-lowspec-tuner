@@ -42,42 +42,61 @@ function Do-Change([scriptblock]$action, $desc) {
     try { & $action; Ok $desc } catch { WarnMsg ("失敗：$desc -> " + $_.Exception.Message) }
 }
 
-function Show-CheckList ($title, $prompt, [string[]]$items, [bool]$DefaultChecked = $true, $OkText = '移除勾選項目') {
+function Show-CheckList ($title, $prompt, [string[]]$items, [bool]$DefaultChecked = $true, $OkText = '移除勾選項目', [hashtable]$Details = $null) {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
     $form = New-Object System.Windows.Forms.Form
     $form.Text = $title
-    $form.ClientSize = New-Object System.Drawing.Size(480, 500)
+    $form.ClientSize = New-Object System.Drawing.Size(820, 570)
+    $form.MinimumSize = New-Object System.Drawing.Size(600, 460)
     $form.StartPosition = 'CenterScreen'
     $form.TopMost = $true
-    $form.FormBorderStyle = 'FixedDialog'
-    $form.MaximizeBox = $false; $form.MinimizeBox = $false
+    $form.FormBorderStyle = 'Sizable'      # 可拖曳縮放 / 最大化：項目文字長時才看得完整
+    $form.MaximizeBox = $true; $form.MinimizeBox = $false
     $form.Font = New-Object System.Drawing.Font('Microsoft JhengHei UI', 9)
     $lbl = New-Object System.Windows.Forms.Label
     $lbl.Text = $prompt
     $lbl.Location = New-Object System.Drawing.Point(14, 12)
-    $lbl.Size = New-Object System.Drawing.Size(452, 44)
+    $lbl.Size = New-Object System.Drawing.Size(792, 44)
+    $lbl.Anchor = 'Top,Left,Right'
     $form.Controls.Add($lbl)
     $clb = New-Object System.Windows.Forms.CheckedListBox
     $clb.Location = New-Object System.Drawing.Point(14, 60)
-    $clb.Size = New-Object System.Drawing.Size(452, 360)
+    $clb.Size = New-Object System.Drawing.Size(792, 360)
+    $clb.Anchor = 'Top,Bottom,Left,Right'
     $clb.CheckOnClick = $true
+    $clb.HorizontalScrollbar = $true       # 項目文字超出寬度時可左右捲動
     foreach ($it in $items) { [void]$clb.Items.Add($it, $DefaultChecked) }
+    $maxW = 0
+    foreach ($it in $items) { $w = [System.Windows.Forms.TextRenderer]::MeasureText([string]$it, $clb.Font).Width; if ($w -gt $maxW) { $maxW = $w } }
+    $clb.HorizontalExtent = $maxW + 30
     $form.Controls.Add($clb)
+    # 詳細欄：選到哪一項就顯示它的完整內容（清單一行放不下時看這裡）
+    $txt = New-Object System.Windows.Forms.TextBox
+    $txt.Multiline = $true; $txt.ReadOnly = $true; $txt.ScrollBars = 'Vertical'
+    $txt.Location = New-Object System.Drawing.Point(14, 428)
+    $txt.Size = New-Object System.Drawing.Size(792, 84)
+    $txt.Anchor = 'Bottom,Left,Right'
+    $form.Controls.Add($txt)
+    $clb.Add_SelectedIndexChanged({
+        $sel = [string]$clb.SelectedItem
+        $txt.Text = if ($Details -and $Details.ContainsKey($sel)) { $Details[$sel] } else { $sel }
+    }.GetNewClosure())
+    if ($clb.Items.Count) { $clb.SelectedIndex = 0 }
     $btnAll = New-Object System.Windows.Forms.Button
-    $btnAll.Text = '全選'; $btnAll.Location = New-Object System.Drawing.Point(14, 430); $btnAll.Size = New-Object System.Drawing.Size(80, 32)
+    $btnAll.Text = '全選'; $btnAll.Location = New-Object System.Drawing.Point(14, 522); $btnAll.Size = New-Object System.Drawing.Size(80, 32); $btnAll.Anchor = 'Bottom,Left'
     $btnAll.Add_Click({ 0..($clb.Items.Count - 1) | ForEach-Object { $clb.SetItemChecked($_, $true) } }.GetNewClosure())
     $form.Controls.Add($btnAll)
     $btnNone = New-Object System.Windows.Forms.Button
-    $btnNone.Text = '全不選'; $btnNone.Location = New-Object System.Drawing.Point(100, 430); $btnNone.Size = New-Object System.Drawing.Size(80, 32)
+    $btnNone.Text = '全不選'; $btnNone.Location = New-Object System.Drawing.Point(100, 522); $btnNone.Size = New-Object System.Drawing.Size(80, 32); $btnNone.Anchor = 'Bottom,Left'
     $btnNone.Add_Click({ 0..($clb.Items.Count - 1) | ForEach-Object { $clb.SetItemChecked($_, $false) } }.GetNewClosure())
     $form.Controls.Add($btnNone)
     $btnOk = New-Object System.Windows.Forms.Button
-    $btnOk.Text = $OkText; $btnOk.Location = New-Object System.Drawing.Point(258, 430); $btnOk.Size = New-Object System.Drawing.Size(128, 32)
+    $btnOk.Text = $OkText; $btnOk.Location = New-Object System.Drawing.Point(598, 522); $btnOk.Size = New-Object System.Drawing.Size(128, 32); $btnOk.Anchor = 'Bottom,Right'
     $btnOk.DialogResult = [System.Windows.Forms.DialogResult]::OK
     $form.Controls.Add($btnOk)
     $btnCancel = New-Object System.Windows.Forms.Button
-    $btnCancel.Text = '取消'; $btnCancel.Location = New-Object System.Drawing.Point(392, 430); $btnCancel.Size = New-Object System.Drawing.Size(74, 32)
+    $btnCancel.Text = '取消'; $btnCancel.Location = New-Object System.Drawing.Point(732, 522); $btnCancel.Size = New-Object System.Drawing.Size(74, 32); $btnCancel.Anchor = 'Bottom,Right'
     $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
     $form.Controls.Add($btnCancel)
     $form.AcceptButton = $btnOk; $form.CancelButton = $btnCancel
@@ -556,13 +575,14 @@ function Manage-StartupApps {
         return
     }
     $map = @{}
+    $det = @{}
     $display = foreach ($e in $enabled) {
-        $cmd = $e.Command; if ($cmd.Length -gt 48) { $cmd = $cmd.Substring(0, 45) + '...' }
-        $d = '{0}    [{1}]    {2}' -f $e.Name, $e.Label, $cmd
+        $d = '{0}    [{1}]    {2}' -f $e.Name, $e.Label, $e.Command   # 不截斷：太長就用橫向捲軸或下方詳細欄看
         $map[$d] = $e
+        $det[$d] = "名稱：{0}`r`n來源：{1}`r`n指令：{2}" -f $e.Name, $e.Label, $e.Command
         $d
     }
-    $picked = Show-CheckList '選擇要停用的開機程式' ("預設全部「不勾選」（保守做法）。`r`n只勾選你確定不需要開機自動啟動的程式；停用 = 不刪除程式，隨時可手動開或一鍵還原。`r`n切勿停用：音效 / 觸控板 / 防毒 / 輸入法 等驅動小工具！") $display $false '停用勾選項目'
+    $picked = Show-CheckList '選擇要停用的開機程式' ("預設全部「不勾選」（保守做法）。點選一項，下方會顯示它的完整名稱與指令。`r`n只勾選你確定不需要開機自動啟動的程式；停用 = 不刪除程式，隨時可手動開或一鍵還原。`r`n切勿停用：音效 / 觸控板 / 防毒 / 輸入法 等驅動小工具！") $display $false '停用勾選項目' $det
     if ($null -eq $picked) { Skip '使用者取消'; return }
     if (-not @($picked).Count) { Skip '未勾選任何項目，不變更'; return }
     $backupFile = Join-Path $PSScriptRoot 'startup-disabled-backup.json'
@@ -604,11 +624,15 @@ function Set-DefenderExclusions {
     if ($script:DryRun) { Log '    [試跑] 會詢問要排除的路徑，並用 Add-MpPreference -ExclusionPath 加入' 'Magenta'; return }
     Log '    適合：開發目錄（git / node_modules / build 輸出）這類檔案多又常改、即時掃描最耗資源的地方。' 'DarkGray'
     Log '    不允許：涵蓋「下載」資料夾或 Windows 資料夾的路徑。整顆磁碟（如 D:\）須再確認一次。' 'DarkGray'
-    $raw = Read-Host '    輸入要排除的路徑（多個用 ; 分隔，例如 D:\Workshops；直接 Enter 略過）'
+    $raw = Read-Host '    輸入要排除的路徑（多個用 ; 分隔，例如 D:\Workshops；整顆磁碟寫 D:\；直接 Enter 略過）'
     if (-not $raw -or -not $raw.Trim()) { Skip '未輸入路徑'; return }
     try { $existing = @((Get-MpPreference -ErrorAction Stop).ExclusionPath) } catch { WarnMsg ('無法讀取 Defender 設定：' + $_.Exception.Message); return }
     $added = @()
     foreach ($item in ($raw -split ';' | ForEach-Object { $_.Trim().Trim('"') } | Where-Object { $_ })) {
+        # 'D:' 在 Windows 代表「D 槽目前所在的資料夾」而不是根目錄（GetFullPath 會代入程序的工作目錄），
+        # 'Workshops' / 'D:Workshops' 也是相對路徑；一律要求 X:\ 開頭，只有單純的 'D:' 自動補成 'D:\'。
+        if ($item -match '^[A-Za-z]:$') { $item += '\' }
+        elseif ($item -notmatch '^[A-Za-z]:[\\/]') { WarnMsg "請輸入含磁碟機代號的完整路徑（例如 D:\Workshops），略過：$item"; continue }
         try { $norm = [IO.Path]::GetFullPath($item) } catch { WarnMsg "路徑格式不正確，略過：$item"; continue }
         $isRoot = $norm -match '^[A-Za-z]:\\$'
         if (-not $isRoot) { $norm = $norm.TrimEnd('\') }
