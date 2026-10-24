@@ -63,6 +63,17 @@ Try-Do 'Defender 排除資料夾 → 移除本工具加入的項目（依備份�
         Remove-Item $bf -Force -ErrorAction SilentlyContinue
     }
 }
+Try-Do 'Defender 即時防護 → 還原（依備份檔 revert-data-defender-rt.json）' {
+    $bf = Join-Path $PSScriptRoot 'revert-data-defender-rt.json'
+    if (Test-Path $bf) {
+        $saved = Get-Content $bf -Raw | ConvertFrom-Json
+        $key = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection'
+        if ($saved.policyExisted) { Set-ItemProperty $key -Name DisableRealtimeMonitoring -Value ([int]$saved.policyValue) -Type DWord }
+        else { Remove-ItemProperty $key -Name DisableRealtimeMonitoring -ErrorAction SilentlyContinue }
+        Set-MpPreference -DisableRealtimeMonitoring $false -ErrorAction Stop
+        Remove-Item $bf -Force -ErrorAction SilentlyContinue
+    }
+}
 Try-Do 'Windows Update → 解除鎖定（還原服務/原則 + 移除自動重鎖排程）' {
     $bak = Join-Path $PSScriptRoot 'revert-data-wu.json'
     $saved = $null

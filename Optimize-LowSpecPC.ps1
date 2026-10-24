@@ -657,6 +657,36 @@ function Set-DefenderExclusions {
     }
 }
 
+$script:RtPolicyKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection'
+
+function Disable-DefenderRealtime {
+    Step 16 'Defender 即時防護停用（選用；風險：不再即時掃描下載與執行的檔案）'
+    if ($script:DryRun) { Log '    [試跑] 會檢查竄改防護；關閉時才用 Set-MpPreference + 原則 DisableRealtimeMonitoring 停用即時防護' 'Magenta'; return }
+    try { $st = Get-MpComputerStatus -ErrorAction Stop } catch { WarnMsg ('無法讀取 Defender 狀態：' + $_.Exception.Message); return }
+    if ($st.IsTamperProtected) {
+        WarnMsg '竄改防護目前是開啟的，腳本無法也不該繞過它，已停止。'
+        Log '    請手動關閉：Windows 安全性 → 病毒與威脅防護 → 病毒與威脅防護設定 → 管理設定 → 竄改防護 → 關，然後重跑本項。' 'Yellow'
+        return
+    }
+    if (-not $st.RealTimeProtectionEnabled) { Skip '即時防護已經是關閉的'; return }
+    Log '    建議只在「只連 GitHub 開發、不亂開下載檔」的機器使用；Revert 會還原。' 'DarkGray'
+    if ((Read-Host '    確定停用 Defender 即時防護？(y/N)') -notmatch '^[Yy]') { Skip '使用者略過'; return }
+    $bf = Join-Path $PSScriptRoot 'revert-data-defender-rt.json'
+    if (-not (Test-Path $bf)) {
+        $prev = (Get-ItemProperty $script:RtPolicyKey -Name DisableRealtimeMonitoring -EA SilentlyContinue).DisableRealtimeMonitoring
+        @{ policyExisted = ($null -ne $prev); policyValue = $prev } | ConvertTo-Json | Set-Content -Path $bf -Encoding UTF8
+    }
+    try {
+        Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction Stop
+        if (-not (Test-Path $script:RtPolicyKey)) { New-Item -Path $script:RtPolicyKey -Force | Out-Null }
+        Set-ItemProperty -Path $script:RtPolicyKey -Name DisableRealtimeMonitoring -Value 1 -Type DWord
+        # Defender 切換狀態要幾秒，最多等 10 秒再判斷
+        for ($i = 0; $i -lt 10 -and (Get-MpComputerStatus).RealTimeProtectionEnabled; $i++) { Start-Sleep -Seconds 1 }
+        if ((Get-MpComputerStatus).RealTimeProtectionEnabled) { WarnMsg '指令沒有報錯但即時防護仍是開啟（可能被其他管理原則覆蓋）' }
+        else { Ok 'Defender 即時防護已停用；Revert-LowSpecPC.ps1 會還原' }
+    } catch { WarnMsg ('停用失敗：' + $_.Exception.Message) }
+}
+
 # ========================= 狀態檢查（只讀，不變更） =========================
 function StatLine ($name, $isOn, $detail = '') {
     $mark  = if ($isOn) { '[ 已套用 ]' } else { '[ 未套用 ]' }
@@ -734,6 +764,9 @@ function Get-OptimizationStatus {
     $excPaths = @(); if (Test-Path $excFile) { try { $excPaths = @((Get-Content $excFile -Raw | ConvertFrom-Json).paths) } catch {} }
     StatLine 'Defender 排除資料夾（本工具加入）' ($excPaths.Count -gt 0) $(if ($excPaths.Count) { $excPaths -join ' ; ' } else { '尚未設定（依個人需求，非必做）' })
 
+    $rtOff = $null; try { $rtOff = -not (Get-MpComputerStatus -EA Stop).RealTimeProtectionEnabled } catch {}
+    StatLine 'Defender 即時防護已停用' ($rtOff -eq $true) $(if ($null -eq $rtOff) { '無法查詢' } else { '依個人需求，非必做' })
+
     Log ''
     Log '  [已套用]=綠色已生效；[未套用]=灰色。選用項目沒做是正常的。' 'DarkGray'
     Log '  (固定分頁檔/WU 設定值會立即顯示為已套用，但實際效果需重開機。)' 'DarkGray'
@@ -775,7 +808,8 @@ function Apply-Optional {
         @{ Name = '停用開機自動啟動程式';        Func = { Manage-StartupApps } },
         @{ Name = 'Windows Update → 鎖定（手動更新）'; Func = { Lock-WindowsUpdate } },
         @{ Name = '固定分頁檔大小';              Func = { Set-FixedPageFile } },
-        @{ Name = 'Defender 排除資料夾（開發目錄等）'; Func = { Set-DefenderExclusions } }
+        @{ Name = 'Defender 排除資料夾（開發目錄等）'; Func = { Set-DefenderExclusions } },
+        @{ Name = 'Defender 即時防護停用（需先手動關竄改防護）'; Func = { Disable-DefenderRealtime } }
     )
     foreach ($o in $opts) {
         $ans = Read-Host ("是否執行：{0}？(y/N)" -f $o.Name)
@@ -792,6 +826,7 @@ function Show-OptionalDryRun {
     Lock-WindowsUpdate
     Set-FixedPageFile
     Set-DefenderExclusions
+    Disable-DefenderRealtime
 }
 
 # ---- 主程式 ----

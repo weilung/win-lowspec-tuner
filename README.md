@@ -64,9 +64,12 @@
 | Windows Update → 鎖定 | 完全由你挑時間手動裝（Pro 用原則、家用版停服務；附「開窗更新」） | **選用** | Revert |
 | 固定分頁檔 | HDD 上減少破碎、避免臨時長大卡頓 | **選用** | Revert |
 | Defender 排除資料夾 | 開發目錄（git / node_modules / build 輸出）不再被即時掃描，省 `MsMpEng.exe` 的 CPU 與磁碟 | **選用（降低防護範圍）** | Revert（只移除本工具加入的） |
+| Defender 即時防護停用 | 完全不跑即時掃描，省最多 `MsMpEng.exe` 資源 | **選用（高風險：不再即時防護）** | Revert |
 
 > 「Defender 掃描溫和化」只是降低排程掃描的 CPU 優先權與用量，**即時防護全程開著**，不會降低防毒能力。
 
+> 「Defender 即時防護停用」需要你**先手動關閉竄改防護**（Windows 安全性 → 病毒與威脅防護設定 → 竄改防護）；竄改防護開著時工具會停下來，不會硬闖。停用同時用 `Set-MpPreference` 與原則 `DisableRealtimeMonitoring` 兩層，重開機後仍維持關閉。原本的原則值記在 `revert-data-defender-rt.json`，Revert 會還原即時防護（竄改防護請自行重新開啟）。手動排程／手動掃描仍可使用。
+>
 > 「Defender 排除資料夾」會讓該路徑下的檔案**完全不被掃描**（即時、排程、手動都不掃），只適合你自己產生、不會放外來檔案的目錄。工具會拒絕涵蓋「下載」或 Windows 資料夾的路徑；整顆內接磁碟（如 `D:\`）須再確認一次；外接碟 / 網路磁碟不允許整顆排除。加入的路徑記在 `revert-data-defender.json`（已被 `.gitignore` 排除），Revert 只移除這些，不動你自己設的排除項目。
 
 > 「停用開機自動啟動程式」只處理可安全還原的兩類：登錄 `Run` 機碼 + 「啟動」資料夾。**Store/UWP App（如 ChatGPT）、Windows 服務（如 FortiClient）、工作排程登入觸發** 不在此功能範圍內 —— 那些請用「工作管理員 → 啟動」分頁或 `services.msc` 處理。
