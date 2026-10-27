@@ -65,6 +65,7 @@
 | 固定分頁檔 | HDD 上減少破碎、避免臨時長大卡頓 | **選用** | Revert |
 | Defender 排除資料夾 | 開發目錄（git / node_modules / build 輸出）不再被即時掃描，省 `MsMpEng.exe` 的 CPU 與磁碟 | **選用（降低防護範圍）** | Revert（只移除本工具加入的） |
 | Defender 即時防護停用 | 完全不跑即時掃描，省最多 `MsMpEng.exe` 資源 | **選用（高風險：不再即時防護）** | Revert |
+| 清除 Edge 開機自動啟動 | 刪掉一直增加的 `MicrosoftEdgeAutoLaunch_*`，並用原則關閉啟動加速／背景執行 | **選用** | Revert |
 
 > 「Defender 掃描溫和化」只是降低排程掃描的 CPU 優先權與用量，**即時防護全程開著**，不會降低防毒能力。
 
@@ -73,6 +74,8 @@
 > 「Defender 排除資料夾」會讓該路徑下的檔案**完全不被掃描**（即時、排程、手動都不掃），只適合你自己產生、不會放外來檔案的目錄。工具會拒絕涵蓋「下載」或 Windows 資料夾的路徑；整顆內接磁碟（如 `D:\`）須再確認一次；外接碟 / 網路磁碟不允許整顆排除。加入的路徑記在 `revert-data-defender.json`（已被 `.gitignore` 排除），Revert 只移除這些，不動你自己設的排除項目。
 
 > 「停用開機自動啟動程式」只處理可安全還原的兩類：登錄 `Run` 機碼 + 「啟動」資料夾。**Store/UWP App（如 ChatGPT）、Windows 服務（如 FortiClient）、工作排程登入觸發** 不在此功能範圍內 —— 那些請用「工作管理員 → 啟動」分頁或 `services.msc` 處理。
+
+> 「清除 Edge 開機自動啟動」：Edge 會在使用者的 `Run` 機碼寫入 `MicrosoftEdgeAutoLaunch_<亂碼>`，而且會一直新增新的一筆、舊的不刪，所以在「停用開機自動啟動程式」停掉一筆，之後又會冒出新的。這一項直接刪除全部這類項目，再寫入原則 `HKLM\SOFTWARE\Policies\Microsoft\Edge` 的 `StartupBoostEnabled=0`、`BackgroundModeEnabled=0`（整台電腦、所有 Edge 設定檔都適用，可在 `edge://policy` 確認）。有原則存在時，Edge 設定頁會顯示「你的瀏覽器由組織管理」，屬正常現象。刪掉的項目與原本的原則值記在 `revert-data-edge.json`，Revert 會照原樣寫回。
 
 ## 🔒 Windows Update → 鎖定（選用）與「開窗更新」
 

@@ -687,6 +687,63 @@ function Disable-DefenderRealtime {
     } catch { WarnMsg ('停用失敗：' + $_.Exception.Message) }
 }
 
+# ----- Edge 開機自動啟動 -----
+# Edge 會在使用者的 Run 機碼寫 MicrosoftEdgeAutoLaunch_<亂碼>，而且會一直新增新的一筆、舊的不刪，
+# 所以只停用（Manage-StartupApps）治不了：這裡直接刪掉，再用整台電腦的原則關掉啟動加速與背景執行。
+$script:EdgePolicyKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge'
+$script:EdgePolicies  = @('StartupBoostEnabled', 'BackgroundModeEnabled')
+
+function Get-EdgeAutoLaunchEntries {
+    $s = $script:StartupSources[0]   # HKCU：Edge 只寫在使用者的 Run
+    $props = Get-ItemProperty -Path $s.Run -EA SilentlyContinue
+    if (-not $props) { return @() }
+    return @($props.PSObject.Properties | Where-Object { $_.Name -like 'MicrosoftEdgeAutoLaunch_*' } | ForEach-Object {
+        [pscustomobject]@{
+            Name     = $_.Name
+            Command  = [string]$_.Value
+            Approved = (Get-ItemProperty -Path $s.Approved -Name $_.Name -EA SilentlyContinue).($_.Name)   # 原始 12 位元組，Revert 照原樣寫回
+            Disabled = (Test-StartupDisabled $s.Approved $_.Name)
+        }
+    })
+}
+
+function Clear-EdgeAutoLaunch {
+    Step 17 'Edge 開機自動啟動：刪除殘留項目 + 用原則關閉啟動加速與背景執行（選用）'
+    $entries  = Get-EdgeAutoLaunchEntries
+    $policyOn = @($script:EdgePolicies | Where-Object { (Get-ItemProperty $script:EdgePolicyKey -Name $_ -EA SilentlyContinue).$_ -ne 0 })
+    if (-not $entries.Count -and -not $policyOn.Count) { Skip '沒有 Edge 自動啟動項目，原則也已設定'; return }
+    $on = @($entries | Where-Object { -not $_.Disabled }).Count
+    Log "    偵測到 $($entries.Count) 筆 MicrosoftEdgeAutoLaunch_*（其中 $on 筆是啟用的）。" 'DarkGray'
+    if ($script:DryRun) { Log ("    [試跑] 會刪除這些項目，並寫入原則 {0} = 0" -f ($script:EdgePolicies -join ' / ')) 'Magenta'; return }
+    $bf = Join-Path $PSScriptRoot 'revert-data-edge.json'
+    $saved = $null
+    if (Test-Path $bf) { try { $saved = Get-Content $bf -Raw | ConvertFrom-Json } catch {} }
+    if (-not $saved) {
+        # 只在第一次記原本的原則值：重跑時原則已是 0，不能蓋掉
+        $prev = @{}
+        foreach ($n in $script:EdgePolicies) { $prev[$n] = (Get-ItemProperty $script:EdgePolicyKey -Name $n -EA SilentlyContinue).$n }
+        $saved = [pscustomobject]@{ policies = $prev; entries = @() }
+    }
+    $s = $script:StartupSources[0]
+    $removed = @()
+    foreach ($e in $entries) {
+        try {
+            Remove-ItemProperty -Path $s.Run -Name $e.Name -ErrorAction Stop
+            Remove-ItemProperty -Path $s.Approved -Name $e.Name -ErrorAction SilentlyContinue
+            $removed += $e
+        } catch { WarnMsg "刪除失敗 $($e.Name)：$($_.Exception.Message)" }
+    }
+    if ($removed.Count) { Ok "已刪除 $($removed.Count) 筆 Edge 開機自動啟動項目" }
+    try {
+        if (-not (Test-Path $script:EdgePolicyKey)) { New-Item -Path $script:EdgePolicyKey -Force | Out-Null }
+        foreach ($n in $script:EdgePolicies) { Set-ItemProperty -Path $script:EdgePolicyKey -Name $n -Value 0 -Type DWord }
+        Ok '已用原則關閉 Edge 啟動加速與背景執行（所有設定檔都適用；可在 edge://policy 確認）'
+        Log '    Edge 設定頁會因此顯示「你的瀏覽器由組織管理」，這是有原則存在的正常提示。' 'DarkGray'
+    } catch { WarnMsg ('寫入 Edge 原則失敗：' + $_.Exception.Message) }
+    $saved.entries = @(@($saved.entries) + @($removed | Select-Object Name, Command, Approved))
+    $saved | ConvertTo-Json -Depth 4 | Set-Content -Path $bf -Encoding UTF8
+}
+
 # ========================= 狀態檢查（只讀，不變更） =========================
 function StatLine ($name, $isOn, $detail = '') {
     $mark  = if ($isOn) { '[ 已套用 ]' } else { '[ 未套用 ]' }
@@ -767,6 +824,10 @@ function Get-OptimizationStatus {
     $rtOff = $null; try { $rtOff = -not (Get-MpComputerStatus -EA Stop).RealTimeProtectionEnabled } catch {}
     StatLine 'Defender 即時防護已停用' ($rtOff -eq $true) $(if ($null -eq $rtOff) { '無法查詢' } else { '依個人需求，非必做' })
 
+    $edgeLeft = @(Get-EdgeAutoLaunchEntries).Count
+    $edgePol  = @($script:EdgePolicies | Where-Object { (Get-ItemProperty $script:EdgePolicyKey -Name $_ -EA SilentlyContinue).$_ -eq 0 }).Count -eq $script:EdgePolicies.Count
+    StatLine 'Edge 開機自動啟動已清除（原則鎖住）' ($edgePol -and -not $edgeLeft) ("原則=$(if ($edgePol) { '已設定' } else { '未設定' })；殘留 $edgeLeft 筆")
+
     Log ''
     Log '  [已套用]=綠色已生效；[未套用]=灰色。選用項目沒做是正常的。' 'DarkGray'
     Log '  (固定分頁檔/WU 設定值會立即顯示為已套用，但實際效果需重開機。)' 'DarkGray'
@@ -809,7 +870,8 @@ function Apply-Optional {
         @{ Name = 'Windows Update → 鎖定（手動更新）'; Func = { Lock-WindowsUpdate } },
         @{ Name = '固定分頁檔大小';              Func = { Set-FixedPageFile } },
         @{ Name = 'Defender 排除資料夾（開發目錄等）'; Func = { Set-DefenderExclusions } },
-        @{ Name = 'Defender 即時防護停用（需先手動關竄改防護）'; Func = { Disable-DefenderRealtime } }
+        @{ Name = 'Defender 即時防護停用（需先手動關竄改防護）'; Func = { Disable-DefenderRealtime } },
+        @{ Name = '清除 Edge 開機自動啟動（刪殘留 + 原則關啟動加速）'; Func = { Clear-EdgeAutoLaunch } }
     )
     foreach ($o in $opts) {
         $ans = Read-Host ("是否執行：{0}？(y/N)" -f $o.Name)
@@ -827,6 +889,7 @@ function Show-OptionalDryRun {
     Set-FixedPageFile
     Set-DefenderExclusions
     Disable-DefenderRealtime
+    Clear-EdgeAutoLaunch
 }
 
 # ---- 主程式 ----

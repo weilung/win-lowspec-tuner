@@ -122,6 +122,29 @@ Try-Do '相容性評估 / CEIP 排程 → 重新啟用' {
         )) { try { Enable-ScheduledTask -TaskName $t.N -TaskPath $t.P -ErrorAction Stop | Out-Null } catch {} }
 }
 
+Try-Do 'Edge 開機自動啟動 → 還原原則與刪掉的項目（依備份檔 revert-data-edge.json）' {
+    $bf = Join-Path $PSScriptRoot 'revert-data-edge.json'
+    if (Test-Path $bf) {
+        $saved = Get-Content $bf -Raw | ConvertFrom-Json
+        $key = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge'
+        foreach ($n in 'StartupBoostEnabled', 'BackgroundModeEnabled') {
+            $v = $saved.policies.$n
+            if ($null -ne $v) { Set-ItemProperty $key -Name $n -Value ([int]$v) -Type DWord }
+            else { Remove-ItemProperty $key -Name $n -ErrorAction SilentlyContinue }
+        }
+        $run  = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+        $appr = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run'
+        foreach ($e in @($saved.entries)) {
+            if (-not $e.Name) { continue }
+            Set-ItemProperty $run -Name $e.Name -Value ([string]$e.Command) -Type String
+            if ($e.Approved) {
+                if (-not (Test-Path $appr)) { New-Item $appr -Force | Out-Null }
+                Set-ItemProperty $appr -Name $e.Name -Value ([byte[]]@($e.Approved)) -Type Binary
+            }
+        }
+        Remove-Item $bf -Force -ErrorAction SilentlyContinue
+    }
+}
 Try-Do '還原被停用的開機程式（依備份檔 startup-disabled-backup.json）' {
     $bf = Join-Path $PSScriptRoot 'startup-disabled-backup.json'
     if (Test-Path $bf) {
